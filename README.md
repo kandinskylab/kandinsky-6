@@ -84,7 +84,7 @@ Presets live in `kandinsky/configs/devices/`.
 ## ComfyUI
 
 For ComfyUI, install [kandinsky6](https://registry.comfy.org/nodes/kandinsky6) and [kandinsky6-sr](https://registry.comfy.org/nodes/kandinsky6-sr) through **ComfyUI Manager**, then restart ComfyUI.
-The `comfyui/` directory contains extension source code; no manual copying is needed — see the [setup guide](comfyui/README.md).
+The `comfyui/` directory contains extension source code; no manual copying is needed — see the [setup guide](comfyui/README.md) and [manual model downloads](comfyui/README.md#manual-downloads).
 
 ## Performance
 

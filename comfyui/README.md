@@ -48,9 +48,39 @@ extra model paths, are reused. Nothing is downloaded during extension install
 or startup. Allow enough disk space for large HF weights.
 
 For gated/private models, obtain access and run `hf auth login` on the ComfyUI
-server first. Manual download URLs and destination paths are recorded in each
-workflow JSON (`properties.models` and `properties.kandinsky6_required_files`);
-keep companion JSON configs beside their weights.
+server first.
+
+### Manual downloads
+
+Download the files separately if you prefer not to use the button. Destinations
+below are relative to your **ComfyUI folder**; create missing directories.
+
+| Download | Destination |
+| --- | --- |
+| [Pro distill 5s — default transformer](https://huggingface.co/kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers/resolve/main/transformer/diffusion_pytorch_model.safetensors) | `models/diffusion_models/Kandinsky-6.0-Pro-distill-5s-Diffusers/transformer/diffusion_pytorch_model.safetensors` |
+| [Qwen3.5-9B — beautifier](https://huggingface.co/Comfy-Org/Qwen3.5/resolve/main/text_encoders/qwen3.5_9b_bf16.safetensors) | `models/text_encoders/qwen3.5_9b_bf16.safetensors` |
+| [Qwen2.5 — text encoder](https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b.safetensors) | `models/text_encoders/qwen_2.5_vl_7b.safetensors` |
+| [CLIP-L — text encoder](https://huggingface.co/Comfy-Org/HunyuanVideo_repackaged/resolve/main/split_files/text_encoders/clip_l.safetensors) | `models/text_encoders/clip_l.safetensors` |
+| [HunyuanVideo VAE](https://huggingface.co/Comfy-Org/HunyuanVideo_repackaged/resolve/main/split_files/vae/hunyuan_video_vae_bf16.safetensors) | `models/vae/hunyuan_video_vae_bf16.safetensors` |
+| [v1-44.pth — audio VAE](https://huggingface.co/hkchengrex/MMAudio/resolve/main/ext_weights/v1-44.pth) | `models/audio_vae/v1-44.pth` |
+| [bigvgan_generator.pt — vocoder](https://huggingface.co/nvidia/bigvgan_v2_44khz_128band_512x/resolve/main/bigvgan_generator.pt) | `models/audio_vae/bigvgan_vocoder/bigvgan_generator.pt` |
+| [config.json — vocoder config](https://huggingface.co/nvidia/bigvgan_v2_44khz_128band_512x/resolve/main/config.json) | `models/audio_vae/bigvgan_vocoder/config.json` |
+
+Both bundled workflows also need the files in the
+[SR manual-download table](https://github.com/kandinskylab/kandinsky-6-sr/blob/main/comfyui/README.md#manual-downloads).
+Keep all listed JSON configs in their specified folders.
+
+For non-distilled Pro, use [this transformer instead](https://huggingface.co/kandinskylab/Kandinsky-6.0-Pro-5s-Diffusers/resolve/main/transformer/diffusion_pytorch_model.safetensors),
+saved as `models/diffusion_models/Kandinsky-6.0-Pro-5s-Diffusers/transformer/diffusion_pytorch_model.safetensors`;
+see **Run** below for its sampling settings. HF access may be required for this
+non-distilled checkpoint. You do not need both transformers.
+
+Models on another drive can use ComfyUI's configured extra model paths.
+For audio, the simplest option is a symbolic link (directory junction on Windows)
+from `models/audio_vae` to your audio-model folder on that drive, keeping the
+same layout above; BigVGAN is loaded from that folder. Restart ComfyUI after
+placing the files and select them in the loader nodes. The download button is
+not required for manual installation.
 
 ## Run
 
@@ -69,8 +99,8 @@ Put exact spoken lines in the video caption as `<S>Look there!<E>`; describe the
 voice and other sounds in the audio caption. Thinking and MTP are off; no vLLM,
 Transformers model or separate LLM server is needed. Qwen3.5 is managed by ComfyUI
 and is separate from the Qwen2.5 text encoder required by Kandinsky.
-Click **Download models** once before your first generation. Its downloader
-includes the companion JSON configs and audio files.
+Before your first generation, use **Download models** or the manual tables above,
+including the companion JSON configs and audio files.
 Use `weight_dtype=default` in **Load Diffusion Model** for the first run.
 I2VA includes a portrait; replace it in **Load Image** to use your own image.
 
