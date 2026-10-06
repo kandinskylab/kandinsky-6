@@ -86,6 +86,65 @@ Presets live in `kandinsky/configs/devices/`.
 For ComfyUI, install [kandinsky6](https://registry.comfy.org/nodes/kandinsky6) and [kandinsky6-sr](https://registry.comfy.org/nodes/kandinsky6-sr) through **ComfyUI Manager**, then restart ComfyUI.
 The `comfyui/` directory contains extension source code; no manual copying is needed — see the [setup guide](comfyui/README.md).
 
+## vLLM-Omni
+
+Kandinsky 6 is on [vLLM-Omni](https://github.com/vllm-project/vllm-omni) `main`.
+Install vLLM 0.31.0 and current vLLM-Omni from source. Use a separate environment from `just setup`.
+
+```bash
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install vllm==0.31.0 --torch-backend=auto \
+  --extra-index-url https://wheels.vllm.ai/db9527a46873454610df6dbedf79a36d6bf1a7f6
+git clone https://github.com/vllm-project/vllm-omni.git
+cd vllm-omni
+uv pip install -e .
+```
+
+Pro defaults are 864×480, 125 frames at 24 fps, 50 steps, and guidance 5.0. Audio is on. On an 80 GB GPU, `--enable-cpu-offload` is required.
+
+Text-to-video-and-audio:
+
+```bash
+python examples/offline_inference/text_to_video/text_to_video.py \
+  --model kandinskylab/Kandinsky-6.0-Pro-5s-Diffusers \
+  --prompt "A golden retriever runs along a sunny beach, waves crashing, cinematic footage" \
+  --seed 42 \
+  --enable-cpu-offload \
+  --output kandinsky6_t2va.mp4
+```
+
+Image-to-video-and-audio, with the image used as a masked tail frame:
+
+```bash
+python examples/offline_inference/image_to_video/image_to_video.py \
+  --model kandinskylab/Kandinsky-6.0-Pro-5s-Diffusers \
+  --image first_frame.png \
+  --prompt "A golden retriever runs along a sunny beach, waves crashing, cinematic footage" \
+  --seed 42 \
+  --enable-cpu-offload \
+  --output kandinsky6_i2va.mp4
+```
+
+Online serving:
+
+```bash
+vllm serve kandinskylab/Kandinsky-6.0-Pro-5s-Diffusers --omni \
+  --host 127.0.0.1 --port 8091 \
+  --num-gpus 1 --enable-cpu-offload
+```
+
+```bash
+VID=$(curl -s -X POST http://127.0.0.1:8091/v1/videos \
+  -F prompt="A golden retriever runs along a sunny beach, waves crashing" \
+  -F size=864x480 -F num_frames=125 -F num_inference_steps=50 -F seed=42 \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+curl -s http://127.0.0.1:8091/v1/videos/$VID
+curl -s -o kandinsky6.mp4 http://127.0.0.1:8091/v1/videos/$VID/content
+```
+
+The checkpoint is [`kandinskylab/Kandinsky-6.0-Pro-5s-Diffusers`](https://huggingface.co/kandinskylab/Kandinsky-6.0-Pro-5s-Diffusers). The API reference is the [Kandinsky 6 module page](https://docs.vllm.ai/projects/vllm-omni/en/latest/api/vllm_omni/diffusion/models/kandinsky6/).
+
 ## Performance
 
 Working time (s) for a 5-second clip on the non-distilled model, after warmup. Weight loading and MP4 encoding are excluded. 
