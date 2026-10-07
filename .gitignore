@@ -153,6 +153,8 @@ activemq-data/
 .env
 .envrc
 .venv
+.venvs/
+.third-party/
 env/
 venv/
 ENV/

@@ -28,3 +28,21 @@ download NAME *ARGS:
 # just export --config kandinsky/configs/devices/h100.yaml --out export/dit.pt2 --device cuda:0
 export *ARGS:
     @uv run kandy export {{ARGS}}
+
+# vLLM 0.31.0 and vLLM-Omni main, in .venvs/vllm-omni. Separate from `just setup`.
+setup-vllm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec "{{justfile_directory()}}/scripts/setup-framework.sh" vllm
+
+# SGLang main with the diffusion extra, in .venvs/sglang. Separate from `just setup`.
+setup-sglang:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec "{{justfile_directory()}}/scripts/setup-framework.sh" sglang
+
+# FastVideo in .venvs/fastvideo. CUDA 13.0, or UV_TORCH_BACKEND=cu126 just setup-fastvideo.
+setup-fastvideo:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec "{{justfile_directory()}}/scripts/setup-framework.sh" fastvideo

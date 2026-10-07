@@ -103,5 +103,6 @@ include = [
     "LICENSE",
     "JUSTFILE",
     "scripts/setup-gpu.sh",
+    "scripts/setup-framework.sh",
     "pyproject.toml",
 ]
