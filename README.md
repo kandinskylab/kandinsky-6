@@ -21,25 +21,24 @@
 <a href="https://huggingface.co/spaces/kandinskylab/Kandinsky-6.0-Pro-distill-5s"><img alt="HF Demo" src="https://img.shields.io/badge/HF%20Demo-D9622B?style=for-the-badge"></a>
 <a href="https://registry.comfy.org/nodes/kandinsky6"><img alt="ComfyUI" src="https://img.shields.io/badge/ComfyUI-EBF764?style=for-the-badge"></a>
 <a href="https://docs.vllm.ai/projects/vllm-omni/en/latest/api/vllm_omni/diffusion/models/kandinsky6/"><img alt="vLL-Omni" src="https://img.shields.io/badge/vLLM Omni-54A0F8?style=for-the-badge"></a>
-<!-- <a href="#"><img alt="PyPI" src="https://img.shields.io/badge/PyPI-3171B2?style=for-the-badge"></a> -->
 <a href="https://docs.sglang.io/cookbook/diffusion/Kandinsky/Kandinsky6"><img alt="SGLang" src="https://img.shields.io/badge/SGLang-C6602D?style=for-the-badge"></a>
 <a href="https://haoailab.com/FastVideo/inference/kandinsky6/"><img alt="FastVideo" src="https://img.shields.io/badge/FastVideo-436BF6?style=for-the-badge"></a>
+<!-- <a href="#"><img alt="PyPI" src="https://img.shields.io/badge/PyPI-3171B2?style=for-the-badge"></a> -->
 
 </div>
 
 <h1>Kandinsky 6.0: A family of diffusion models for Video + Audio generation</h1>
 
 We present Kandinsky 6.0 Video, a family of foundation diffusion models for synchronized text-to-audio-video generation, comprising Kandinsky 6.0 Video Lite (3B parameters)
-and Kandinsky 6.0 Video Pro (29B parameters). Both models generate 5-second video clips
-with synchronized 44 kHz audio, including lip-sync, in text-to-audio-video (T2AV) and image-to-audio-video (TI2AV) modes; a plugin-in super-resolution model raises the output resolution to
-Full-HD (1920×1080).
+and Kandinsky 6.0 Video Pro (29B parameters). Both models generate 5-second video clips with synchronized 44 kHz audio, including lip-sync, in text-to-audio-video (T2AV) and image-to-audio-video (TI2AV) modes. A plug-in [super-resolution model](https://github.com/kandinskylab/kandinsky-6-sr) raises the output resolution to Full HD (1920×1080).
 
 
 ## Project Updates
 
-- ```2026/10/06```: We added [vLLM-omni](https://docs.vllm.ai/projects/vllm-omni/en/latest/api/vllm_omni/diffusion/models/kandinsky6/) support
-- ```2026/10/06```: We added Hugging Face Space for [Kandinsky 6.0 Pro Distill](https://huggingface.co/spaces/kandinskylab/Kandinsky-6.0-Pro-distill-5s)
-- ```2026/10/06```: We have open-sourced `Kandinsky 6.0`
+- 2026/10/06: Kandinsky 6.0 is now available in [Diffusers](https://huggingface.co/docs/diffusers/main/en/api/pipelines/kandinsky6), [ComfyUI](https://registry.comfy.org/nodes/kandinsky6), [vLLM-omni](https://docs.vllm.ai/projects/vllm-omni/en/latest/api/vllm_omni/diffusion/models/kandinsky6/), [SGLang](https://docs.sglang.io/cookbook/diffusion/Kandinsky/Kandinsky6) and [FastVideo](https://haoailab.com/FastVideo/inference/kandinsky6)
+- 2026/10/06: We added Hugging Face Space for [Kandinsky 6.0 Pro Distill](https://huggingface.co/spaces/kandinskylab/Kandinsky-6.0-Pro-distill-5s)
+- 2026/10/06: We have open-sourced **Kandinsky 6.0** and [**Kandinsky 6.0 Video Super-Resolution**](https://github.com/kandinskylab/kandinsky-6-sr)
+
 
 
 ## Quick start
