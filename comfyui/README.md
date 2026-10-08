@@ -1,8 +1,10 @@
 # Kandinsky 6
 
-Text-to-video+audio and image-to-video+audio with Kandinsky 6 Pro.
-Two ready-to-run workflows default to **Pro distilled PiFlow (10 steps, CFG=1)**,
-with an I2VA reference portrait. Non-distilled Pro and MagCache remain supported.
+Text-to-video+audio and image-to-video+audio with Kandinsky 6.
+Supports **Pro, Pro Distill, Lite and Lite Distill**.
+Two ready-to-run workflows default to **Pro Distill PiFlow (10 steps, CFG=1)**,
+with an I2VA reference portrait. MagCache is supported only for non-distilled Pro
+and automatically bypassed for distilled models.
 Both include native **Qwen3.5-9B** prompt beautification and use the separate
 **Kandinsky6 SR** extension for super resolution.
 
@@ -58,6 +60,7 @@ below are relative to your **ComfyUI folder**; create missing directories.
 | Download | Destination |
 | --- | --- |
 | [Pro distill 5s — default transformer](https://huggingface.co/kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers/resolve/main/transformer/diffusion_pytorch_model.safetensors) | `models/diffusion_models/Kandinsky-6.0-Pro-distill-5s-Diffusers/transformer/diffusion_pytorch_model.safetensors` |
+| [Lite distill 5s — optional, smaller transformer](https://huggingface.co/kandinskylab/Kandinsky-6.0-Lite-distill-5s-Diffusers/resolve/main/transformer/diffusion_pytorch_model.safetensors) | `models/diffusion_models/Kandinsky-6.0-Lite-distill-5s-Diffusers/transformer/diffusion_pytorch_model.safetensors` |
 | [Qwen3.5-9B — beautifier](https://huggingface.co/Comfy-Org/Qwen3.5/resolve/main/text_encoders/qwen3.5_9b_bf16.safetensors) | `models/text_encoders/qwen3.5_9b_bf16.safetensors` |
 | [Qwen2.5 — text encoder](https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b.safetensors) | `models/text_encoders/qwen_2.5_vl_7b.safetensors` |
 | [CLIP-L — text encoder](https://huggingface.co/Comfy-Org/HunyuanVideo_repackaged/resolve/main/split_files/text_encoders/clip_l.safetensors) | `models/text_encoders/clip_l.safetensors` |
@@ -74,6 +77,12 @@ For non-distilled Pro, use [this transformer instead](https://huggingface.co/kan
 saved as `models/diffusion_models/Kandinsky-6.0-Pro-5s-Diffusers/transformer/diffusion_pytorch_model.safetensors`;
 see **Run** below for its sampling settings. HF access may be required for this
 non-distilled checkpoint. You do not need both transformers.
+
+For **Lite distilled**, download its transformer from the table and select it in
+**Load Diffusion Model** in either template. All other weights and settings stay
+the same: **10 steps, CFG=1, denoise=1, audio scaling=0.417**. Detection is automatic;
+MagCache is bypassed. The download button still fetches the default Pro distilled
+bundle, not the optional Lite transformer.
 
 Models on another drive can use ComfyUI's configured extra model paths.
 For audio, the simplest option is a symbolic link (directory junction on Windows)
@@ -104,14 +113,17 @@ including the companion JSON configs and audio files.
 Use `weight_dtype=default` in **Load Diffusion Model** for the first run.
 I2VA includes a portrait; replace it in **Load Image** to use your own image.
 
-**Kandinsky 6 Sampler** selects PiFlow automatically for distilled Pro; use
+**Kandinsky 6 Sampler** selects PiFlow automatically for distilled Pro or Lite; use
 **10 steps, CFG=1, denoise=1** and audio VAE **scaling=0.417**. Its sampler/scheduler
 selectors apply only to non-distilled models. **MagCache automatically bypasses
 distilled models**, even if its node is connected.
 For [non-distilled Pro](https://huggingface.co/kandinskylab/Kandinsky-6.0-Pro-5s-Diffusers),
 select its transformer and use **50 steps, CFG=5, audio scaling=0.5302**.
 Set MagCache's `steps` to the sampler's step count; it is calibrated for
-**non-distilled Pro only**, not Lite or VSR. Both templates include VSR.
+**non-distilled Pro only**, not Lite or VSR. For
+[non-distilled Lite](https://huggingface.co/kandinskylab/Kandinsky-6.0-Lite-5s-Diffusers),
+use its transformer with the same 50-step settings and remove/bypass the MagCache
+node. Both templates include VSR.
 The default VSR scale is **2.25x**. For **4x**, select `4x` in both the VSR node
 and the latent-upscaler loader; **2x/2.25x** use the loader's `2x` entry.
 VSR's `use_nabla` defaults to **off**, using ComfyUI's selected attention backend

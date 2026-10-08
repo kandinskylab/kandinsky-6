@@ -11,7 +11,8 @@ from .supported_model import Kandinsky6
 # The generated contract describes Pro. Lite is the same architecture at a
 # smaller size, so only its dimensions are listed here (k6_video
 # k6_lite_121_480_864_mOffload_nocomp.yaml and the Lite I2VA release config);
-# every other setting — flags, sampling, audio — is shared with Pro.
+# every other setting — flags, sampling, audio — is shared with Pro. Both
+# distilled sizes carry expanded video/audio output heads (detected below).
 _LITE_DIT_CONFIG = {
     **DIT_CONFIG,
     "time_dim": 512,
@@ -180,8 +181,6 @@ def _detect_k6(state_dict, key_prefix):
     if cfg["out_visual_dim"] % base_visual_output:
         raise ValueError("Kandinsky 6 output head does not contain complete DX grids.")
     cfg["n_grid"] = cfg["out_visual_dim"] // base_visual_output
-    if cfg["n_grid"] > 1 and model_dim != int(DIT_CONFIG["model_dim"]):
-        raise ValueError("Distilled K6 Lite checkpoints are not supported.")
     audio_output_key = f"{kp}audio_outLayer.out_layer.weight"
     cfg["out_audio_dim"] = int(dit_config["in_audio_dim"]) * cfg["n_grid"]
     if cfg["n_grid"] > 1 and audio_output_key not in state_dict:
