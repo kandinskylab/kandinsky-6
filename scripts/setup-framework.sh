@@ -53,7 +53,7 @@ case "$name" in
     fastvideo)
         ensure_venv .venvs/fastvideo
         backend="${UV_TORCH_BACKEND:-cu130}"
-        UV_TORCH_BACKEND="$backend" uv pip install --python .venvs/fastvideo/bin/python fastvideo
+        UV_TORCH_BACKEND=cu130 uv pip install --python .venvs/fastvideo/bin/python "fastvideo @ git+https://github.com/hao-ai-lab/FastVideo.git"
         echo "FastVideo is installed in .venvs/fastvideo (UV_TORCH_BACKEND=$backend)"
         ;;
     *)
