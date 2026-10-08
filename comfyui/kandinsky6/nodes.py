@@ -432,11 +432,11 @@ class Kandinsky6TextEncode:
 
 
 class Kandinsky6Sampler(comfy_nodes.KSampler):
-    """Use PiFlow for distilled Pro, or ComfyUI's selected sampler for base models."""
+    """Use PiFlow for distilled Pro/Lite, or ComfyUI's sampler for base models."""
 
     CATEGORY = "Kandinsky 6"
     DESCRIPTION = (
-        "Automatically runs the DX PiFlow policy for distilled Pro (CFG=1). "
+        "Automatically runs the DX PiFlow policy for distilled Pro/Lite (CFG=1). "
         "For non-distilled models, uses the normal ComfyUI sampler and scheduler."
     )
 
@@ -510,7 +510,7 @@ class Kandinsky6MagCache:
         "Native K6 Pro MagCache. Uses the released T2VA/I2VA calibration to "
         "skip about half of the expensive DiT block-stack evaluations. The "
         "steps value must match the sampler for base Pro (default 50). "
-        "Automatically bypassed for distilled Pro. Not calibrated for K6 Lite or VSR."
+        "Automatically bypassed for distilled Pro/Lite. Not calibrated for base K6 Lite or VSR."
     )
 
     def apply(self, model, steps, threshold, max_skip_steps, retention_ratio):

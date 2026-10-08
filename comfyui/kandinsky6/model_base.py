@@ -125,7 +125,7 @@ class Kandinsky6(comfy.model_base.Kandinsky5):
     def _apply_model(self, *args, **kwargs):
         if self.diffusion_model.n_grid > 1:
             raise ValueError(
-                "Use Kandinsky6Sampler for distilled Pro PiFlow; "
+                "Use Kandinsky6Sampler for distilled Pro/Lite PiFlow; "
                 "a stock Euler KSampler cannot integrate DX grids."
             )
         return super()._apply_model(*args, **kwargs)
