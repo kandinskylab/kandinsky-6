@@ -46,7 +46,7 @@ case "$name" in
         # Kandinsky 6 is not in a released SGLang package. Install current main.
         ensure_venv .venvs/sglang
         clone_main https://github.com/sgl-project/sglang.git .third-party/sglang
-        uv pip install --python .venvs/sglang/bin/python --prerelease=allow \
+        uv pip install --python "$PWD/.venvs/sglang/bin/python" --prerelease=allow \
             --directory .third-party/sglang -e "python[diffusion]"
         echo "SGLang is installed in .venvs/sglang"
         ;;
