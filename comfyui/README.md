@@ -1,9 +1,10 @@
 # Kandinsky 6
 
-Text-to-video+audio and image-to-video+audio with Kandinsky 6 Pro and Lite.
-Two ready-to-run workflows default to **Pro distilled PiFlow (10 steps, CFG=1)**,
-with an I2VA reference portrait. Lite distilled and non-distilled Pro/Lite are also
-supported; MagCache is available for non-distilled Pro only.
+Text-to-video+audio and image-to-video+audio with Kandinsky 6.
+Supports **Pro, Pro Distill, Lite and Lite Distill**.
+Two ready-to-run workflows default to **Pro Distill PiFlow (10 steps, CFG=1)**,
+with an I2VA reference portrait. MagCache is supported only for non-distilled Pro
+and automatically bypassed for distilled models.
 Both include native **Qwen3.5-9B** prompt beautification and use the separate
 **Kandinsky6 SR** extension for super resolution.
 
