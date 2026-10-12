@@ -32,6 +32,81 @@ clone_main() {
     git clone --depth 1 "$url" "$dest"
 }
 
+gpu_cap() {
+    if ! command -v nvidia-smi >/dev/null; then
+        echo "nvidia-smi is not on PATH" >&2
+        exit 1
+    fi
+    local -a caps
+    mapfile -t caps < <(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | sed 's/ //g' | sort -u)
+    if [ "${#caps[@]}" -ne 1 ]; then
+        echo "GPUs report more than one compute capability: ${caps[*]}" >&2
+        exit 1
+    fi
+    echo "${caps[0]}"
+}
+
+# FastVideo's FLASH_ATTN selector imports the flash_attn package, then uses
+# flash_attn_interface (FA3) when that package is installed.
+install_flash_attn() {
+    local python="$1"
+    if ! "$python" -c "import flash_attn" >/dev/null 2>&1; then
+        echo "compiling FlashAttention-2 into $python"
+        uv pip install --python "$python" --no-build-isolation flash-attn
+    fi
+    if ! "$python" -c "import flash_attn_interface" >/dev/null 2>&1; then
+        echo "installing FlashAttention-3"
+        uv pip install --python "$python" --no-deps \
+            --default-index https://download.pytorch.org/whl/cu130 \
+            "flash-attn-3==3.0.0"
+    fi
+    "$python" -c "import flash_attn, flash_attn_interface"
+}
+
+# SageAttention 2.2.0. SM121 (GB10) has no kernel in that tag, so the build targets 12.0.
+install_sage() {
+    local python="$1"
+    local arch="$2"
+    local src cuda_home
+    if [ "$arch" = "12.1" ]; then
+        arch="12.0"
+    fi
+    if "$python" -c "import sageattention" >/dev/null 2>&1; then
+        echo "SageAttention is already installed"
+        return 0
+    fi
+    cuda_home="${CUDA_HOME:-/usr/local/cuda}"
+    if [ ! -x "$cuda_home/bin/nvcc" ]; then
+        echo "nvcc not found at $cuda_home. Set CUDA_HOME to the CUDA toolkit." >&2
+        exit 1
+    fi
+    src="$(mktemp -d)"
+    git clone --depth 1 --branch v2.2.0 https://github.com/thu-ml/SageAttention.git "$src/SageAttention"
+    TORCH_CUDA_ARCH_LIST="$arch" CUDA_HOME="$cuda_home" \
+        uv pip install --python "$python" --no-build-isolation --no-deps "$src/SageAttention"
+    rm -rf "$src"
+}
+
+install_fastvideo_attention() {
+    local python="$1"
+    local cap
+    cap=$(gpu_cap)
+    case "$cap" in
+        9.0)
+            echo "compute capability $cap -> FlashAttention-3"
+            install_flash_attn "$python"
+            ;;
+        8.0 | 8.6 | 8.9 | 12.0 | 12.1)
+            echo "compute capability $cap -> SageAttention 2.2.0"
+            install_sage "$python" "$cap"
+            ;;
+        *)
+            echo "No FastVideo attention profile for compute capability $cap" >&2
+            exit 1
+            ;;
+    esac
+}
+
 case "$name" in
     vllm)
         ensure_venv .venvs/vllm-omni
@@ -53,7 +128,8 @@ case "$name" in
     fastvideo)
         ensure_venv .venvs/fastvideo
         backend="${UV_TORCH_BACKEND:-cu130}"
-        UV_TORCH_BACKEND=cu130 uv pip install --python .venvs/fastvideo/bin/python "fastvideo @ git+https://github.com/hao-ai-lab/FastVideo.git"
+        UV_TORCH_BACKEND="$backend" uv pip install --python .venvs/fastvideo/bin/python "fastvideo @ git+https://github.com/hao-ai-lab/FastVideo.git"
+        install_fastvideo_attention .venvs/fastvideo/bin/python
         echo "FastVideo is installed in .venvs/fastvideo (UV_TORCH_BACKEND=$backend)"
         ;;
     *)

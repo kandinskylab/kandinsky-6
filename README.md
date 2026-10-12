@@ -43,153 +43,24 @@ and Kandinsky 6.0 Video Pro (29B parameters). Both models generate 5-second vide
 
 ## Quick start
 
-An NVIDIA GPU and Python 3.13 or 3.14.
+An NVIDIA GPU. You need [uv](https://docs.astral.sh/uv/) and [just](https://just.systems/). Each path has its own environment and generate command:
 
-The first run downloads [Kandinsky-6.0-Pro-distill-5s](https://huggingface.co/kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers) into `$KANDINSKY_HOME/weights`. When `$KANDINSKY_HOME` is unset, that directory is `~/.cache/kandinsky`. The clip is written to `$KANDINSKY_HOME/outputs/generate_<YYYY-MM-DDTHH-MM-SS>/generations/output.mp4`, with the expanded prompt in `expanded_prompt.txt` next to `launch.json`, `logs/`, and `profiles/`. The generate command downloads the checkpoint named in the config if it is not already on disk. Other catalog names are `pro`, `pro-pretrain`, `lite`, `lite-distill`, and `lite-pretrain`.
+| Path | Guide |
+|---|---|
+| Pipeline | [docs/quick_start.md](docs/quick_start.md) |
+| vLLM-Omni | [docs/quick_start_vllm.md](docs/quick_start_vllm.md) |
+| SGLang | [docs/quick_start_sglang.md](docs/quick_start_sglang.md) |
+| FastVideo | [docs/quick_start_fastvideo.md](docs/quick_start_fastvideo.md) |
 
-### Clone the repository
-
-You need [uv](https://docs.astral.sh/uv/) and [just](https://just.systems/).
+The recipe index is [docs/just.md](docs/just.md).
 
 ```bash
 git clone https://github.com/kandinskylab/kandinsky-6.git
-cd k6_video
+cd kandinsky-6
 just setup
-```
-
-`just setup` reads the GPU and installs one PyTorch build:
-
-| GPUs | Compute capability | Installed |
-|---|---|---|
-| Hopper (H100, H200) | 9.0 | PyTorch for CUDA 13.0, FlashAttention 3 |
-| Ampere, Ada, consumer Blackwell | 8.0, 8.6, 8.9, 12.0, 12.1 | PyTorch for CUDA 13.0, then SageAttention 2.2.0 |
-
-Ampere, Ada, and consumer Blackwell compile SageAttention, so `nvcc` has to be on `PATH`. `CUDA_HOME` defaults to `/usr/local/cuda`.
-
-```bash
 just download pro-distill
-just generate "a cat on a mat"
+just generate 'A cat is lying on a mat, turns toward the camera, opens its mouth and says <S>Hello<E>'
 ```
-
-Another GPU uses its preset:
-
-```bash
-just generate "a cat on a mat" --config kandinsky/configs/devices/rtx-5090.yaml --out clip.mp4
-```
-
-Presets live in `kandinsky/configs/devices/`.
-
-## ComfyUI
-
-For ComfyUI, install [kandinsky6](https://registry.comfy.org/nodes/kandinsky6) and [kandinsky6-sr](https://registry.comfy.org/nodes/kandinsky6-sr) through **ComfyUI Manager**, then restart ComfyUI.
-The `comfyui/` directory contains extension source code; no manual copying is needed — see the [setup guide](comfyui/README.md) and [manual model downloads](comfyui/README.md#manual-downloads).
-
-## vLLM-Omni
-
-Kandinsky 6 is on [vLLM-Omni](https://github.com/vllm-project/vllm-omni) `main`.
-`just setup-vllm` installs vLLM 0.31.0 and that checkout into `.venvs/vllm-omni` (Python 3.12). The source is cloned to `.third-party/vllm-omni`. This environment is separate from `just setup`.
-
-```bash
-just setup-vllm
-```
-
-Pro defaults are 864×480, 125 frames at 24 fps, 50 steps, and guidance 5.0. Audio is on. On an 80 GB GPU, `--enable-cpu-offload` is required.
-
-Text-to-video-and-audio:
-
-```bash
-.venvs/vllm-omni/bin/python .third-party/vllm-omni/examples/offline_inference/text_to_video/text_to_video.py \
-  --model kandinskylab/Kandinsky-6.0-Pro-5s-Diffusers \
-  --prompt "A golden retriever runs along a sunny beach, waves crashing, cinematic footage" \
-  --seed 42 \
-  --enable-cpu-offload \
-  --output kandinsky6_t2va.mp4
-```
-
-Image-to-video-and-audio, with the image used as a masked tail frame:
-
-```bash
-.venvs/vllm-omni/bin/python .third-party/vllm-omni/examples/offline_inference/image_to_video/image_to_video.py \
-  --model kandinskylab/Kandinsky-6.0-Pro-5s-Diffusers \
-  --image first_frame.png \
-  --prompt "A golden retriever runs along a sunny beach, waves crashing, cinematic footage" \
-  --seed 42 \
-  --enable-cpu-offload \
-  --output kandinsky6_i2va.mp4
-```
-
-Online serving:
-
-```bash
-.venvs/vllm-omni/bin/vllm serve kandinskylab/Kandinsky-6.0-Pro-5s-Diffusers --omni \
-  --host 127.0.0.1 --port 8091 \
-  --num-gpus 1 --enable-cpu-offload
-```
-
-```bash
-VID=$(curl -s -X POST http://127.0.0.1:8091/v1/videos \
-  -F prompt="A golden retriever runs along a sunny beach, waves crashing" \
-  -F size=864x480 -F num_frames=125 -F num_inference_steps=50 -F seed=42 \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-curl -s http://127.0.0.1:8091/v1/videos/$VID
-curl -s -o kandinsky6.mp4 http://127.0.0.1:8091/v1/videos/$VID/content
-```
-
-The checkpoint is [`kandinskylab/Kandinsky-6.0-Pro-5s-Diffusers`](https://huggingface.co/kandinskylab/Kandinsky-6.0-Pro-5s-Diffusers). The API reference is the [Kandinsky 6 module page](https://docs.vllm.ai/projects/vllm-omni/en/latest/api/vllm_omni/diffusion/models/kandinsky6/).
-
-## SGLang
-
-Kandinsky 6 is not in a released SGLang package. `just setup-sglang` checks out [SGLang](https://github.com/sgl-project/sglang) `main` into `.third-party/sglang` and installs the `diffusion` extra into `.venvs/sglang` (Python 3.12). Running it again reuses that checkout. Delete `.third-party/sglang` first to pick up a newer `main`.
-
-```bash
-just setup-sglang
-```
-
-Authenticate to Hugging Face with `hf auth login`, or set `HF_TOKEN`, before the first run. The documented GPUs are B200, GB300, and RTX PRO 6000.
-
-```bash
-.venvs/sglang/bin/sglang generate \
-  --model-path kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers \
-  --performance-mode speed \
-  --attention-backend fa \
-  --warmup-mode off \
-  --prompt "A woman chops vegetables in a sunlit kitchen, with soft jazz playing." \
-  --seed 42 \
-  --save-output
-```
-
-On RTX PRO 6000, use `--attention-backend torch_sdpa`. Image conditioning adds `--image-path first_frame.png`. The full recipe is the [SGLang Kandinsky 6 page](https://docs.sglang.io/cookbook/diffusion/Kandinsky/Kandinsky6).
-
-## FastVideo
-
-`just setup-fastvideo` installs [FastVideo](https://haoailab.com/FastVideo/inference/kandinsky6/) into `.venvs/fastvideo` (Python 3.12). The PyTorch build is CUDA 13.0. On CUDA 12.6, run `UV_TORCH_BACKEND=cu126 just setup-fastvideo` instead.
-
-```bash
-just setup-fastvideo
-```
-
-Run this with `.venvs/fastvideo/bin/python`. Leave `image_path` unset for text only.
-
-```python
-from fastvideo import VideoGenerator
-
-generator = VideoGenerator.from_pretrained(
-    "kandinskylab/Kandinsky-6.0-Pro-distill-5s-Diffusers",
-    num_gpus=1,
-    dit_cpu_offload=False,
-    text_encoder_cpu_offload=True,
-)
-generator.generate_video(
-    "A golden retriever runs along a sunny beach, waves crashing, cinematic footage",
-    image_path=None,
-    output_path="kandinsky6_fastvideo",
-    height=512,
-    width=768,
-    num_frames=121,
-)
-```
-
-FlashAttention is optional and is not part of this install. The upstream example is [`basic_kandinsky6_ti2va.py`](https://github.com/hao-ai-lab/FastVideo/blob/main/examples/inference/basic/basic_kandinsky6_ti2va.py).
 
 ## Performance
 

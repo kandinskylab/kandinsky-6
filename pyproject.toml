@@ -102,7 +102,10 @@ include = [
     "assets",
     "LICENSE",
     "JUSTFILE",
+    "docs/just.md",
     "scripts/setup-gpu.sh",
     "scripts/setup-framework.sh",
+    "scripts/generate-framework.sh",
+    "examples/fastvideo_ti2va.py",
     "pyproject.toml",
 ]
