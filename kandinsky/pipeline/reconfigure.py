@@ -288,6 +288,8 @@ def _apply_offload(pipe, strategy: OffloadStrategy, pin_memory: bool, *, force: 
     if strategy == "none":
         return
     for name in _MODULE_NAMES:
+        if name == "text_embedder" and getattr(pipe, "release_text_encoder", False):
+            continue
         module = getattr(pipe, name, None)
         if module is not None:
             pipe.offload.register(name, module)
@@ -295,6 +297,8 @@ def _apply_offload(pipe, strategy: OffloadStrategy, pin_memory: bool, *, force: 
 
 def _move_modules(pipe, device: torch.device) -> None:
     for name in _MODULE_NAMES:
+        if name == "text_embedder" and getattr(pipe, "release_text_encoder", False):
+            continue
         module = getattr(pipe, name, None)
         if module is not None:
             _module_to(module, device, non_blocking=False)
@@ -309,7 +313,8 @@ def _replace_dit(pipe, cfg: PipelineConfig, engine: str, load_device: torch.devi
 
 
 def _replace_text(pipe, cfg: PipelineConfig, load_device: torch.device) -> None:
-    text_device = pipe.device if cfg.text_embedder.quantized_qwen else load_device
+    pipe.release_text_encoder = cfg.text_embedder.release_after_encode
+    text_device = pipe.device if (cfg.text_embedder.quantized_qwen or cfg.text_embedder.release_after_encode) else load_device
     pipe.text_embedder = Kandinsky6TextEmbedder(
         qwen_path=cfg.paths.qwen,
         clip_path=cfg.paths.clip,

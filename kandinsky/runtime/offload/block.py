@@ -235,14 +235,17 @@ class BlockOffload:
                 block.forward = self._decorate(block.forward, groups[index], following)
 
     def _decorate(self, forward, group: _TensorGroup, following: _TensorGroup | None):
-        @wraps(forward)
+        # Do not copy Dynamo's _torchdynamo_orig_callable from an already
+        # compiled bound method: disable() would unwrap past this residency
+        # wrapper to an UNBOUND forward, losing both self and the H2D hooks.
+        @wraps(forward, updated=())
         def wrapped(*args, **kwargs):
             with self._use_block(group, following):
                 return forward(*args, **kwargs)
 
         # Keep transfer orchestration out of Dynamo; forward itself may already
         # be regionally compiled, and is called with CUDA tensors bound in place.
-        return torch.compiler.disable(wrapped)
+        return torch.compiler.disable(wrapped, recursive=False)
 
     def _prefetch(self, group: _TensorGroup, *, exclude: _Slot | None = None) -> _Slot:
         for slot in self._slots:

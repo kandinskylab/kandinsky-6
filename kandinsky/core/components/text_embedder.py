@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 
 import torch
@@ -118,6 +119,7 @@ class Kandinsky6TextEmbedder:
         self.max_length = max_length
         self.device = torch.device(device)
         self.quantized_qwen = quantized_qwen
+        self._paths = (qwen_path, clip_path)
         # K5 parity: pad to max_length (static shapes for compile/AOTI) + attn mask.
         self.text_token_padding = text_token_padding
 
@@ -219,6 +221,24 @@ class Kandinsky6TextEmbedder:
         if attention_mask is not None:
             attention_mask = attention_mask.to(self.device)
         return embeds_dict, cu_seqlens.to(self.device), attention_mask
+
+    def release(self) -> None:
+        """Drop device-bound NF4 weights instead of pretending they offload to CPU."""
+        if self.qwen is None and self.clip is None:
+            return
+        self.qwen = None
+        self.clip = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def ensure_loaded(self) -> None:
+        """Reload weights released after a previous request/warmup."""
+        if self.qwen is not None:
+            return
+        qwen_path, clip_path = self._paths
+        self.__init__(qwen_path, clip_path, max_length=self.max_length, device=self.device,
+                      quantized_qwen=self.quantized_qwen, text_token_padding=self.text_token_padding)
 
     def to(self, device, non_blocking: bool = False) -> Kandinsky6TextEmbedder:
         self.device = torch.device(device)

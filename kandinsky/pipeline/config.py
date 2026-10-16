@@ -148,6 +148,8 @@ class TextEmbedderConfig(_Cfg):
     max_length: int = 1024
     # NF4 Qwen via bitsandbytes (``kandinsky.runtime.quantize.nf4``). Saves ~10–12 GiB VRAM.
     quantized_qwen: bool = False
+    # NF4 weights are device-bound; drop/reload after text encoding on 16-GB cards.
+    release_after_encode: bool = False
 
 
 class AudioVAEConfig(_Cfg):

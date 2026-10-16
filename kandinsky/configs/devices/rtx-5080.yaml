@@ -20,7 +20,13 @@ attention:
 
 text_embedder:
   quantized_qwen: true
+  release_after_encode: true
 
 beautifier:
   # none | qwen25
   name: qwen25
+
+sr:
+  decode_segment_frames: 4
+  decode_spatial_splits: 2
+  decode_spatial_overlap: 4

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from functools import wraps
 from pathlib import Path
 
@@ -66,6 +67,8 @@ def _release_modules_after_call(function):
         try:
             return function(self, *args, **kwargs)
         finally:
+            if getattr(self, "release_text_encoder", False):
+                self.text_embedder.release()
             self.offload.release("text_embedder", "dit", "vae", "audio_vae", "vocoder")
 
     return wrapped
@@ -106,9 +109,11 @@ class Kandinsky6Pipeline:
         max_area: int | None = None,
         image_divisibility: int = 16,
         piflow_conf=None,
+        release_text_encoder: bool = False,
     ):
         self.dit = dit
         self.text_embedder = text_embedder
+        self.release_text_encoder = release_text_encoder
         self.vae = vae
         self.audio_vae = audio_vae
         self.vocoder = vocoder
@@ -446,7 +451,11 @@ class Kandinsky6Pipeline:
 
         decode_names = ("vae", "audio_vae", "vocoder") if do_audio else ("vae",)
 
-        with self.offload.use("text_embedder", prefetch="dit"):
+        text_stage = (nullcontext() if self.release_text_encoder
+                      else self.offload.use("text_embedder", prefetch="dit"))
+        with text_stage:
+            if self.release_text_encoder:
+                self.text_embedder.ensure_loaded()
             # Qwen stays on CPU until this stage. Expanding outside it runs the
             # beautifier on the host.
             captions = self._expand_captions(
@@ -462,6 +471,13 @@ class Kandinsky6Pipeline:
                 null_embeds, null_cu_seqlens, null_attention_mask = {}, None, None
             else:
                 null_embeds, null_cu_seqlens, null_attention_mask = self.text_embedder.encode(negative_texts)
+
+        if self.release_text_encoder:
+            # Embeddings must outlive the weights; no prefetch of DiT while
+            # the device-bound NF4 encoder is still taking up ~6 GiB.
+            text_embeds = {k: v.clone() for k, v in text_embeds.items()}
+            null_embeds = {k: v.clone() for k, v in null_embeds.items()}
+            self.text_embedder.release()
 
         # Move embeddings / ropes to compute device for DiT (bf16 — no autocast).
         text_embeds = {k: v.to(device=self.device, dtype=torch.bfloat16) for k, v in text_embeds.items()}

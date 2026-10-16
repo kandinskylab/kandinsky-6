@@ -265,6 +265,46 @@ class TimeMemModuleProfile:
         self._enabled = True
         for obj, attr, name in _component_targets(pipe):
             self._patch(obj, attr, self._wrap_component(getattr(obj, attr), name))
+        if getattr(pipe, "release_text_encoder", False):
+            self._watch_text_lifecycle(pipe.text_embedder)
+
+    def _watch_text_lifecycle(self, text: Any) -> None:
+        """Do not let profiling retain NF4 weights after release, including warmup.
+
+        The benchmark temporarily assigns a NoOpProfile during warmup, but
+        this handle's installed forward wrappers are still present. Unpatch
+        old weights on release; wrap the replacement models after reload.
+        """
+        ensure_loaded, release = text.ensure_loaded, text.release
+
+        def ensure(*args: Any, **kwargs: Any) -> Any:
+            result = ensure_loaded(*args, **kwargs)
+            existing = {(id(obj), attr) for obj, attr, _prev in self._restores}
+            for attr, name in (("qwen", "text_encoder"), ("clip", "text_encoder_2")):
+                module = getattr(text, attr, None)
+                if module is not None and (id(module), "forward") not in existing:
+                    self._patch(module, "forward", self._wrap_component(module.forward, name))
+            return result
+
+        def drop(*args: Any, **kwargs: Any) -> Any:
+            self._forget_text_weights(text)
+            return release(*args, **kwargs)
+
+        self._patch(text, "ensure_loaded", ensure)
+        self._patch(text, "release", drop)
+
+    def _forget_text_weights(self, text: Any) -> None:
+        module_ids = {id(getattr(text, attr, None)) for attr in ("qwen", "clip")}
+        kept = []
+        for obj, attr, prev in self._restores:
+            if id(obj) not in module_ids:
+                kept.append((obj, attr, prev))
+            elif prev is None:
+                with suppress(AttributeError):
+                    delattr(obj, attr)
+            else:
+                setattr(obj, attr, prev)
+        self._restores = kept
 
     @contextmanager
     def pipeline(self) -> Iterator[None]:

@@ -180,7 +180,7 @@ def _build_pipeline(
         cfg.dit.text_token_padding = True
 
     # NF4 Qwen must load on CUDA (bitsandbytes); keep it on compute device even with module offload.
-    text_device = device if cfg.text_embedder.quantized_qwen else load_device
+    text_device = device if (cfg.text_embedder.quantized_qwen or cfg.text_embedder.release_after_encode) else load_device
     text_embedder = Kandinsky6TextEmbedder(
         qwen_path=cfg.paths.qwen,
         clip_path=cfg.paths.clip,
@@ -215,7 +215,8 @@ def _build_pipeline(
     dit = CacheDiT(dit)
 
     if strategy != "none":
-        offload.register("text_embedder", text_embedder)
+        if not cfg.text_embedder.release_after_encode:
+            offload.register("text_embedder", text_embedder)
         offload.register("dit", dit)
         offload.register("vae", vae)
         if audio_vae is not None:
@@ -244,6 +245,7 @@ def _build_pipeline(
         max_area=gen.max_area,
         image_divisibility=gen.image_divisibility,
         piflow_conf=cfg.piflow,
+        release_text_encoder=cfg.text_embedder.release_after_encode,
     )
     _apply_cache(pipe, cfg.cache, cache_mode, force=True)
     remember(

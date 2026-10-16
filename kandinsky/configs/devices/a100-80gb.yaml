@@ -24,3 +24,8 @@ text_embedder:
 beautifier:
   # none | qwen25
   name: qwen25
+
+sr:
+  decode_segment_frames: 16
+  decode_spatial_splits: 1
+  decode_spatial_overlap: 4

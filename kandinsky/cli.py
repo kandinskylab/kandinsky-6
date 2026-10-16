@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import os
@@ -149,6 +150,7 @@ def generate(  # noqa: PLR0913
     fps, audio_fps = int(pipe.fps), pipe.audio_fps
     profile = pipe.profile
     del pipe  # free the base model before the SR components come in
+    gc.collect()
     _super_resolve_if_enabled(
         config,
         device,
@@ -201,6 +203,7 @@ def _synchronize(device: str) -> None:
         torch.cuda.synchronize(torch.device(device))
 
 
+@torch.no_grad()
 def _super_resolve_if_enabled(  # noqa: PLR0913
     config: str,
     device: str,
@@ -226,14 +229,15 @@ def _super_resolve_if_enabled(  # noqa: PLR0913
     if sr_pipe is None:
         return
     from kandinsky_sr.pipeline.components import scale_factor_for
-    from kandinsky_sr.pipeline.warmup import clip_base_resolution, compile_vae_decode, warmup
+    from kandinsky_sr.pipeline.warmup import clip_base_resolution, compile_vae_decode
+    from kandinsky_sr.pipeline.warmup import warmup as warmup_sr
     out_path = Path(out)
     sr_path = out_path.with_name(f"{out_path.stem}_sr{out_path.suffix}")
     frames_tchw = result.frames[0].permute(1, 0, 2, 3).contiguous().cpu()  # (3,T,H,W) -> (T,3,H,W)
     # One-time compile work outside the SR pipeline, as kandy-sr does: flex/nabla
     # attention kernels, then the KVAE decode for the base resolution this clip tiles into.
     with sr_pipe.offload.use("dit"):
-        warmup(sr_pipe.dit, scale_factor_for(sr_pipe), device)
+        warmup_sr(sr_pipe.dit, scale_factor_for(sr_pipe), device)
     with sr_pipe.offload.use("vae"):
         compile_vae_decode(sr_pipe, device, bases=[clip_base_resolution(sr_pipe, tuple(frames_tchw.shape[-2:]))])
     sr_kwargs = {

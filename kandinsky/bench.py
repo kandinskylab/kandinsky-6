@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import torch
 import yaml
 
 from kandinsky.pipeline.config import load_config
@@ -239,6 +240,7 @@ def _synchronize(device: str) -> None:
         torch.cuda.synchronize(torch.device(device))
 
 
+@torch.no_grad()
 def _super_resolve(pipe, result, out: Path) -> None:
     """Saved SR pass. The base pipeline stays loaded for the next resolution."""
     import torch
