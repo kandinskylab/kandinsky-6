@@ -87,6 +87,9 @@ def piflow_denoise_loop(  # noqa: PLR0913, PLR0915
     batch_size = video_cu_seqlens.shape[0] - 1
     raw_t_src = torch.ones(batch_size, device=device, dtype=torch.float32)
 
+    video_time_scale = 1000.0 if sample_video else 0.0
+    audio_time_scale = 1000.0 if sample_audio else 0.0
+
     for step_id in range(num_steps):
         is_final_step = step_id == num_steps - 1
         segment_size = base_segment_size * (final_step_size_scale if is_final_step else 1.0)
@@ -105,7 +108,7 @@ def piflow_denoise_loop(  # noqa: PLR0913, PLR0915
             x_audio=audio,
             text_embed=text_embeds["text_embeds"],
             pooled_text_embed=text_embeds["pooled_embed"],
-            time=[sigma_t_src * 1000, sigma_t_src * 1000],
+            time=[sigma_t_src * video_time_scale, sigma_t_src * audio_time_scale],
             visual_rope=visual_rope,
             audio_rope=audio_rope,
             text_rope=text_rope,

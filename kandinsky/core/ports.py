@@ -12,6 +12,7 @@ this module.  Importing the contract does not require Flash-Attention,
 MagiCompiler, or another optional acceleration dependency.
 """
 
+from .algo.conditioning import encode_audio_condition, encode_video_condition
 from .algo.denoise_loop import denoise_loop
 from .algo.flow_matching import flow_match_timesteps
 from .algo.guidance import apply_cfg
@@ -33,6 +34,8 @@ __all__ = (
     "compute_rope1d",
     "compute_visual_rope",
     "denoise_loop",
+    "encode_audio_condition",
+    "encode_video_condition",
     "flow_match_timesteps",
     "postprocess_audio",
     "postprocess_video",

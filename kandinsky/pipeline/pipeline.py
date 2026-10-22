@@ -20,11 +20,13 @@ from ..core.algo.prepare_latents import (
 )
 from ..core.algo.prepare_ropes import VisualRopeCache, compute_rope1d
 from ..core.components.beautifier import NullBeautifier
+from ..core.ports import encode_audio_condition, encode_video_condition
 from ..core.types import Kandinsky6PipelineOutput, LatentBundle
 from ..runtime.cache import CacheDiT, CacheMode
 from ..runtime.offload import NoOpOffload, OffloadHandle, OffloadStrategy
 from ..runtime.profile import NoOpProfile
 from .config import CacheConfig, MagCacheConfig, NaviCacheConfig, PipelineConfig
+from .media import load_audio_condition, load_video_condition
 from .progress import denoising_progress
 from .reconfigure import reconfigure as _reconfigure
 
@@ -311,8 +313,21 @@ class Kandinsky6Pipeline:
         show_progress: bool = False,
         image: str | object | list[str | object] | None = None,
         visual_cond_scheme: str | None = None,
+        audio: str | Path | None = None,
+        video: str | Path | None = None,
     ) -> Kandinsky6PipelineOutput:
         batch_size = _batch_size(text, negative_text, image, save_path)
+        conditioned = audio is not None or video is not None
+        if audio is not None and video is not None:
+            raise ValueError("pass either audio or video conditioning, not both")
+        if conditioned and image is not None:
+            raise ValueError("audio/video conditioning cannot be combined with image conditioning")
+        if conditioned and batch_size != 1:
+            raise ValueError("audio/video conditioning currently requires batch size 1")
+        if conditioned and sample_audio is False:
+            raise ValueError("audio/video conditioning requires the audio stream; omit sample_audio=False")
+        if conditioned and self.cache_conf.mode != "none":
+            raise ValueError("audio/video conditioning requires cache.mode=none")
         texts = _batch_values(text, batch_size, "text")
         negative_texts = _batch_values(negative_text, batch_size, "negative_text")
         images = None if image is None else _batch_values(image, batch_size, "image")
@@ -350,6 +365,12 @@ class Kandinsky6Pipeline:
             if sample_audio is not None
             else bool(getattr(dit, "is_multimodal", False) and self.audio_vae is not None and self.vocoder is not None)
         )
+        if conditioned:
+            if not getattr(dit, "is_multimodal", False):
+                raise ValueError("audio/video conditioning requires a multimodal transformer")
+            do_audio = True
+        generate_audio = do_audio and audio is None
+        generate_video = video is None
         if do_audio and (self.audio_vae is None or self.vocoder is None):
             raise ValueError("sample_audio=True requires audio_vae and vocoder")
 
@@ -445,6 +466,24 @@ class Kandinsky6Pipeline:
         W_patches = W_lat // dit.patch_size[2]
 
         decode_names = ("vae", "audio_vae", "vocoder") if do_audio else ("vae",)
+        source_frames = None
+        source_audio = None
+        clean_video = None
+        clean_audio = None
+        if video is not None:
+            source_frames = load_video_condition(
+                video, height=height, width=width,
+                num_frames=(num_frames - 1) * 4 + 1, fps=self.fps,
+            )
+            with self.offload.use("vae", prefetch="text_embedder"):
+                clean_video = encode_video_condition(source_frames.to(self.device), self.vae)
+        if audio is not None:
+            source_audio = load_audio_condition(
+                audio, sample_rate=self.audio_fps, fps=self.fps,
+                num_samples=round(((num_frames - 1) * 4 + 1) / self.fps * self.audio_fps),
+            )
+            with self.offload.use("audio_vae", prefetch="text_embedder"):
+                clean_audio = encode_audio_condition(torch.as_tensor(source_audio, device=self.device), self.audio_vae)
 
         with self.offload.use("text_embedder", prefetch="dit"):
             # Qwen stays on CPU until this stage. Expanding outside it runs the
@@ -486,7 +525,8 @@ class Kandinsky6Pipeline:
             device=self.device,
         )
         bundle = LatentBundle(
-            video=bundle.video.reshape(batch_size, num_frames, H_lat, W_lat, dit.in_visual_dim),
+            video=(clean_video if clean_video is not None else
+                   bundle.video.reshape(batch_size, num_frames, H_lat, W_lat, dit.in_visual_dim)),
             audio=bundle.audio,
             video_cu_seqlens=bundle.video_cu_seqlens,
             audio_cu_seqlens=bundle.audio_cu_seqlens,
@@ -520,6 +560,8 @@ class Kandinsky6Pipeline:
                 audio_fps=self.audio_fps,
                 downsample_factor=downsample,
             )
+            if clean_audio is not None:
+                audio_dur = clean_audio.shape[1]
             bundle = prepare_audio_latents(
                 bundle,
                 audio_duration=audio_dur,
@@ -529,7 +571,8 @@ class Kandinsky6Pipeline:
             )
             bundle = LatentBundle(
                 video=bundle.video,
-                audio=bundle.audio.reshape(batch_size, audio_dur, dit.in_audio_dim),
+                audio=(clean_audio if clean_audio is not None else
+                       bundle.audio.reshape(batch_size, audio_dur, dit.in_audio_dim)),
                 video_cu_seqlens=bundle.video_cu_seqlens,
                 audio_cu_seqlens=bundle.audio_cu_seqlens,
             )
@@ -577,7 +620,8 @@ class Kandinsky6Pipeline:
                         scheduler_scale=scheduler_scale,
                         first_frames=first_frames,
                         visual_cond_scheme=scheme,
-                        sample_audio=do_audio,
+                        sample_audio=generate_audio,
+                        sample_video=generate_video,
                         attention_mask=attention_mask,
                         visual_token_type_ids=visual_token_type_ids,
                         scale_factor=self.scale_factor,
@@ -602,7 +646,8 @@ class Kandinsky6Pipeline:
                         scheduler_scale=scheduler_scale,
                         first_frames=first_frames,
                         visual_cond_scheme=scheme,
-                        sample_audio=do_audio,
+                        sample_audio=generate_audio,
+                        sample_video=generate_video,
                         attention_mask=attention_mask,
                         null_attention_mask=null_attention_mask,
                         visual_token_type_ids=visual_token_type_ids,
@@ -628,8 +673,10 @@ class Kandinsky6Pipeline:
 
         # --- decode ---
         with self.offload.use(*decode_names):
-            frames = postprocess_video(result_bundle, self.vae, bs=batch_size)
-            audio = postprocess_audio(result_bundle, self.audio_vae, self.vocoder) if do_audio else None
+            frames = (source_frames if source_frames is not None else
+                      postprocess_video(result_bundle, self.vae, bs=batch_size))
+            audio = ([source_audio] if source_audio is not None else
+                     postprocess_audio(result_bundle, self.audio_vae, self.vocoder) if do_audio else None)
 
         path = None
         if save_paths is not None:
