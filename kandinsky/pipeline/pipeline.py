@@ -12,7 +12,6 @@ from ..core.algo.piflow_sampler import piflow_denoise_loop
 from ..core.algo.postprocess_audio import postprocess_audio
 from ..core.algo.postprocess_video import postprocess_video
 from ..core.algo.prepare_latents import (
-    append_i2va_tail_condition,
     audio_latent_duration,
     encode_i2va_first_frame,
     prepare_audio_latents,
@@ -20,6 +19,7 @@ from ..core.algo.prepare_latents import (
 )
 from ..core.algo.prepare_ropes import VisualRopeCache, compute_rope1d
 from ..core.components.beautifier import NullBeautifier
+from ..core.ports import append_reference_rope, append_visual_references
 from ..core.types import Kandinsky6PipelineOutput, LatentBundle
 from ..runtime.cache import CacheDiT, CacheMode
 from ..runtime.offload import NoOpOffload, OffloadHandle, OffloadStrategy
@@ -58,6 +58,22 @@ def _batch_values(value, batch_size: int, name: str) -> list:
 def _batch_size(*values) -> int:
     sizes = [len(value) for value in values if isinstance(value, (list, tuple))]
     return max(sizes, default=1)
+
+
+def _reference_batch(images: list[object] | None) -> tuple[list[object] | None, list[object] | None]:
+    if images is None:
+        return None, None
+    references = [list(item) if isinstance(item, (list, tuple)) else [item] for item in images]
+    counts = {len(item) for item in references}
+    if not counts.issubset({1, 2}):
+        raise ValueError("each image sample must contain one or two reference images")
+    if len(counts) != 1:
+        raise ValueError("mixed image batch: all samples must have the same number of reference images")
+    if any(image is None for item in references for image in item):
+        raise ValueError("reference images must not be None")
+    return [item[0] for item in references], (
+        [item[1] for item in references] if counts == {2} else None
+    )
 
 
 def _release_modules_after_call(function):
@@ -316,6 +332,7 @@ class Kandinsky6Pipeline:
         texts = _batch_values(text, batch_size, "text")
         negative_texts = _batch_values(negative_text, batch_size, "negative_text")
         images = None if image is None else _batch_values(image, batch_size, "image")
+        images, last_images = _reference_batch(images)
         if save_path is not None and batch_size > 1 and not isinstance(save_path, (list, tuple)):
             raise ValueError("save_path must be a list when generating a batch")
         save_paths = None if save_path is None else _batch_values(save_path, batch_size, "save_path")
@@ -343,6 +360,8 @@ class Kandinsky6Pipeline:
         guidance_weight = self.guidance_weight if guidance_weight is None else guidance_weight
         scheduler_scale = self.scheduler_scale if scheduler_scale is None else scheduler_scale
         scheme = visual_cond_scheme or self.visual_cond_scheme
+        if last_images is not None:
+            scheme = "tail_cond_first_frame"
 
         dit = self.raw_dit
         do_audio = (
@@ -367,6 +386,8 @@ class Kandinsky6Pipeline:
         if images is not None and scheme == "tail_cond_first_frame":
             if getattr(dit, "visual_token_type_num_embeddings", 0) < 2:
                 raise ValueError("tail_cond_first_frame requires dit.visual_token_type_num_embeddings >= 2")
+            if last_images is not None and dit.patch_size[0] != 1:
+                raise ValueError("two reference images require temporal patch_size=1")
 
         if isinstance(self.dit, CacheDiT) and self.dit.mode != "none":
             # Keep cache step counters aligned with this generation's schedule.
@@ -408,6 +429,7 @@ class Kandinsky6Pipeline:
 
         # --- optional I2VA first-frame encode (may override height/width) ---
         first_frames = None
+        last_frames = None
         if images is not None:
             with self.offload.use("vae", prefetch="text_embedder"):
                 encoded_frames = []
@@ -430,6 +452,12 @@ class Kandinsky6Pipeline:
                     elif (item_height, item_width) != (height, width):
                         raise ValueError("all batched images must resolve to the same height and width")
                 first_frames = torch.cat(encoded_frames, dim=0)
+                if last_images is not None:
+                    last_frames = torch.cat([
+                        encode_i2va_first_frame(
+                            item, self.vae, self.device, height=height, width=width
+                        )[0] for item in last_images
+                    ], dim=0)
 
         # Latent grid dimensions
         H_lat = height // 8
@@ -495,10 +523,14 @@ class Kandinsky6Pipeline:
         visual_token_type_ids = None
         generated_visual_mask = None
         if first_frames is not None and scheme == "tail_cond_first_frame":
-            video, visual_token_type_ids, generated_visual_mask = append_i2va_tail_condition(
-                bundle.video, first_frames, batch_size=batch_size, video_duration=video_duration
+            references = first_frames[:, None]
+            if last_frames is not None:
+                references = torch.stack([first_frames, last_frames], dim=1)
+                first_frames = references
+            video, visual_token_type_ids, generated_visual_mask = append_visual_references(
+                bundle.video, references, batch_size=batch_size, video_duration=video_duration
             )
-            duration_with_ref = video_duration + 1
+            duration_with_ref = video_duration + references.shape[1]
             cu = duration_with_ref * torch.arange(batch_size + 1, dtype=torch.int32, device=self.device)
             bundle = LatentBundle(
                 video=video,
@@ -563,7 +595,7 @@ class Kandinsky6Pipeline:
                     audio_len=audio_len,
                 )
                 if scheme == "tail_cond_first_frame" and images is not None:
-                    visual_rope = torch.cat([visual_rope, visual_rope[:1]], dim=0)
+                    visual_rope = append_reference_rope(visual_rope, references.shape[1])
 
                 if piflow_enabled:
                     result_bundle = piflow_denoise_loop(

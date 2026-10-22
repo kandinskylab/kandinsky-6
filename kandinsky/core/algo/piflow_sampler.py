@@ -7,6 +7,7 @@ import torch
 from ..types import LatentBundle, TextEmbeds
 from .denoise_loop import _build_video_input
 from .piflow_math import MultimodalDXPolicy, policy_rollout_fm, shift_timesteps
+from .visual_conditioning import restore_tail_references
 
 
 def _normalize_grid_prediction(prediction: torch.Tensor, state: torch.Tensor, name: str) -> torch.Tensor:
@@ -86,6 +87,7 @@ def piflow_denoise_loop(  # noqa: PLR0913, PLR0915
     base_segment_size = 1.0 / (float(num_steps) - one_minus_final)
     batch_size = video_cu_seqlens.shape[0] - 1
     raw_t_src = torch.ones(batch_size, device=device, dtype=torch.float32)
+    tail_frames = first_frames if visual_cond_scheme == "tail_cond_first_frame" else None
 
     for step_id in range(num_steps):
         is_final_step = step_id == num_steps - 1
@@ -172,6 +174,7 @@ def piflow_denoise_loop(  # noqa: PLR0913, PLR0915
                 policy.policy_A,
             )
         raw_t_src = tau_dst
+        restore_tail_references(video, tail_frames, video_cu_seqlens)
         if progress_callback is not None:
             progress_callback()
 
@@ -184,7 +187,9 @@ def piflow_denoise_loop(  # noqa: PLR0913, PLR0915
             if visual_cond_scheme == "i2v"
             else video_cu_seqlens[1:] - 1
         )
-        if video.ndim == 5:
+        if visual_cond_scheme == "tail_cond_first_frame":
+            restore_tail_references(video, first_frames, video_cu_seqlens)
+        elif video.ndim == 5:
             video[:, 0 if visual_cond_scheme == "i2v" else -1] = first_frames.to(
                 device=device, dtype=video.dtype
             )

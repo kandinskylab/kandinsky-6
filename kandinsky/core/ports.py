@@ -23,13 +23,24 @@ from .algo.prepare_latents import (
     prepare_video_latents,
 )
 from .algo.prepare_ropes import compute_rope1d, compute_visual_rope
+from .algo.visual_conditioning import (
+    append_reference_rope,
+    append_visual_references,
+    build_tail_condition,
+    compute_reference_rope,
+    restore_tail_references,
+)
 from .types import LatentBundle, TextEmbeds
 
 __all__ = (
     "LatentBundle",
     "TextEmbeds",
+    "append_reference_rope",
+    "append_visual_references",
     "apply_cfg",
     "audio_latent_duration",
+    "build_tail_condition",
+    "compute_reference_rope",
     "compute_rope1d",
     "compute_visual_rope",
     "denoise_loop",
@@ -38,4 +49,5 @@ __all__ = (
     "postprocess_video",
     "prepare_audio_latents",
     "prepare_video_latents",
+    "restore_tail_references",
 )

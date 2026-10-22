@@ -7,7 +7,12 @@ from torch import Tensor
 from ..types import LatentBundle, TextEmbeds
 from .flow_matching import flow_match_timesteps
 from .guidance import apply_cfg
-from .prepare_ropes import compute_rope1d, compute_visual_rope
+from .prepare_ropes import compute_rope1d
+from .visual_conditioning import (
+    build_tail_condition,
+    compute_reference_rope,
+    restore_tail_references,
+)
 
 
 def _build_video_input(
@@ -26,6 +31,11 @@ def _build_video_input(
     """
     if not has_visual_cond:
         return video
+
+    if first_frames is not None and visual_cond_scheme == "tail_cond_first_frame":
+        if video_cu_seqlens is None:
+            raise ValueError("tail_cond_first_frame requires video_cu_seqlens")
+        return build_tail_condition(video, first_frames, video_cu_seqlens)
 
     cond = torch.zeros_like(video)
     mask = torch.zeros([*video.shape[:-1], 1], dtype=video.dtype, device=video.device)
@@ -181,11 +191,7 @@ def denoise_loop(
     )
     scale = (float(scale_factor[0]), float(scale_factor[1]), float(scale_factor[2]))
     tail_cond = visual_cond_scheme == "tail_cond_first_frame"
-    ref_positions = (
-        video_cu_seqlens[1:] - 1
-        if tail_cond and video_cu_seqlens is not None
-        else None
-    )
+    reference_count = first_frames.shape[1] if first_frames is not None and first_frames.ndim == 5 else 0
     batched_video = video is not None and video.ndim == 5
 
     for t, dt in zip(timesteps[:-1], torch.diff(timesteps)):
@@ -211,7 +217,7 @@ def denoise_loop(
             vr, ar, tr = visual_rope, audio_rope, rope
             if recompute_ropes_each_step:
                 if vis_shape is not None:
-                    vr = compute_visual_rope(raw.visual_rope, vis_shape, scale)
+                    vr = compute_reference_rope(raw.visual_rope, vis_shape, scale, reference_count)
                 if audio_rope is not None:
                     ar = compute_rope1d(raw.audio_rope, int(audio_rope.shape[0]))
                 tr = _rebuild_text_rope(raw, rope)
@@ -246,10 +252,7 @@ def denoise_loop(
             if video is not None and sample_video:
                 video[..., :out_c] += dt * apply_cfg(vel_v, uvel_v, guidance_weight)
                 if tail_cond and first_frames is not None:
-                    if batched_video:
-                        video[:, -1] = first_frames.to(device=device, dtype=video.dtype)
-                    elif ref_positions is not None:
-                        video[ref_positions] = first_frames.to(device=device, dtype=video.dtype)
+                    restore_tail_references(video, first_frames, video_cu_seqlens)
             if audio is not None and sample_audio:
                 audio += dt * apply_cfg(vel_a, uvel_a, guidance_weight)
         else:
@@ -259,10 +262,7 @@ def denoise_loop(
             if video is not None and sample_video:
                 video[..., :out_c] += dt * vel
                 if tail_cond and first_frames is not None:
-                    if batched_video:
-                        video[:, -1] = first_frames.to(device=device, dtype=video.dtype)
-                    elif ref_positions is not None:
-                        video[ref_positions] = first_frames.to(device=device, dtype=video.dtype)
+                    restore_tail_references(video, first_frames, video_cu_seqlens)
             elif audio is not None and sample_audio:
                 audio += dt * vel
 
@@ -278,10 +278,7 @@ def denoise_loop(
             else:
                 video[video_cu_seqlens[:-1]] = ff
         elif tail_cond:
-            if batched_video:
-                video[:, -1] = ff
-            elif ref_positions is not None:
-                video[ref_positions] = ff
+            restore_tail_references(video, ff, video_cu_seqlens)
 
     # Strip instruct extra-channel padding from the video latent
     if out_c is not None and video is not None:
