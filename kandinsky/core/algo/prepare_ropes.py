@@ -10,6 +10,21 @@ import torch
 from torch import Tensor, nn
 
 
+def on_device(value: Tensor | list[Tensor] | None, device: torch.device) -> Tensor | list[Tensor] | None:
+    """Return RoPE tables on ``device``.
+
+    Offload keeps the RoPE module on CPU while latents already live on the
+    compute device. Tables built from those buffers have to follow the latents.
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [item if item.device == device else item.to(device) for item in value]
+    if value.device == device:
+        return value
+    return value.to(device)
+
+
 def compute_rope1d(rope: nn.Module, length: int, device: torch.device | None = None) -> Tensor:
     """Build 1-D RoPE for positions ``0..length-1``."""
     if length < 1:

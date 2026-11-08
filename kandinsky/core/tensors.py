@@ -40,6 +40,12 @@ def apply_gate_sum(x: Tensor, out: Tensor, gate: Tensor) -> Tensor:
 
 
 def apply_rotary(x: Tensor, rope: Tensor) -> Tensor:
-    """RoPE apply in fp32 (rope tables are fp32), cast back to ``x.dtype``."""
+    """RoPE apply in fp32 (rope tables are fp32), cast back to ``x.dtype``.
+
+    Tables are built from the RoPE module, which block offload leaves on CPU
+    until a stage starts. Activations are already on the compute device, so the
+    table moves with ``x`` before the multiply.
+    """
     x_ = x.reshape(*x.shape[:-1], -1, 1, 2).float()
-    return (rope.float() * x_).sum(dim=-1).reshape(*x.shape).to(dtype=x.dtype)
+    table = rope.to(device=x_.device, dtype=torch.float32)
+    return (table * x_).sum(dim=-1).reshape(*x.shape).to(dtype=x.dtype)

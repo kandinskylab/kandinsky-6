@@ -6,16 +6,20 @@ exportable and compilable via ``CacheDiT.module``.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import logging
+from collections.abc import Callable, Mapping, Sequence
 from typing import Literal
 
 from torch import nn
 
 from ..base import ConfigModel
+from .adataylor import AdaTaylorCache, AdaTaylorConfig
 from .magcache import MagCache, MagCacheConfig, prepare_mag_ratios, select_mag_ratios
 from .navicache import NaviCache, NaviCacheConfig
 
-CacheMode = Literal["none", "magcache", "navicache"]
+logger = logging.getLogger(__name__)
+
+CacheMode = Literal["none", "magcache", "navicache", "adataylor"]
 CacheModeName = CacheMode
 
 
@@ -23,10 +27,11 @@ class CacheConfig(ConfigModel):
     mode: CacheModeName = "none"
     magcache: MagCacheConfig | None = None
     navicache: NaviCacheConfig | None = None
+    adataylor: AdaTaylorConfig | None = None
 
 
-class CacheDiT(MagCache, NaviCache, nn.Module):
-    """Facade around a bare DiT with switchable MagCache / NaviCache / none."""
+class CacheDiT(MagCache, NaviCache, AdaTaylorCache, nn.Module):
+    """Facade around a bare DiT with switchable MagCache / NaviCache / AdaTaylorCache / none."""
 
     def __init__(self, dit: nn.Module):
         super().__init__()
@@ -34,6 +39,7 @@ class CacheDiT(MagCache, NaviCache, nn.Module):
         self.mode: CacheMode = "none"
         self._mag: dict | None = None
         self._navi: dict | None = None
+        self._ada: dict | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -55,16 +61,22 @@ class CacheDiT(MagCache, NaviCache, nn.Module):
         align_steps: int | None = None,
         process_noise: float | None = None,
         measurement_noise: float | None = None,
+        # AdaTaylorCache
+        retain: int | None = None,
+        cooldown: int | None = None,
+        max_hits: int | None = None,
+        extrap: bool | None = None,
     ) -> None:
         if mode is None:
             mode = "none"
-        if mode not in ("none", "magcache", "navicache"):
+        if mode not in ("none", "magcache", "navicache", "adataylor"):
             raise ValueError(f"Unknown cache mode: {mode!r}")
 
         if mode == "none":
             self.mode = "none"
             self._mag = None
             self._navi = None
+            self._ada = None
             return
 
         if num_steps is None:
@@ -75,6 +87,7 @@ class CacheDiT(MagCache, NaviCache, nn.Module):
                 raise ValueError("set_cache('magcache') requires mag_ratios")
             mag_ratios, mode_name = select_mag_ratios(mag_ratios, mode_name)
             self._navi = None
+            self._ada = None
             self._mag = {
                 "num_steps": num_steps * 2,
                 "gen_mode": mode_name,
@@ -88,10 +101,27 @@ class CacheDiT(MagCache, NaviCache, nn.Module):
             self._reset_mag_state()
             return
 
+        if mode == "adataylor":
+            self._mag = None
+            self._navi = None
+            self._ada = {
+                "num_steps": num_steps * 2,
+                "no_cfg": no_cfg,
+                "thresh": 0.3 if thresh is None else thresh,
+                "retain": 15 if retain is None else retain,
+                "cooldown": 2 if cooldown is None else cooldown,
+                "max_hits": 2 if max_hits is None else max_hits,
+                "extrap": True if extrap is None else extrap,
+            }
+            self.mode = "adataylor"
+            self._reset_ada_state()
+            return
+
         # navicache
         if not getattr(self.module, "is_multimodal", False):
             raise NotImplementedError("NaviCache is only implemented for the multimodal (video+audio) T2VA DiT.")
         self._mag = None
+        self._ada = None
         self._navi = {
             "num_forwards": num_steps * 2,
             "num_steps": num_steps,
@@ -105,11 +135,59 @@ class CacheDiT(MagCache, NaviCache, nn.Module):
         self.mode = "navicache"
         self._reset_navi_state()
 
+    def align_schedule(self, num_steps: int, generation_mode: str, *, apply: Callable[..., None]) -> None:
+        """Rebuild MagCache or NaviCache when this call's step count or mode differs.
+
+        ``apply`` is the pipeline ``set_cache``. The doubled MagCache counter stays
+        inside this class. ``num_steps`` passed to ``apply`` is the schedule length.
+        """
+        if self.mode == "magcache" and self._mag is not None:
+            steps_changed = self._mag["num_steps"] != num_steps * 2
+            mode_changed = self._mag["gen_mode"] is not None and generation_mode != self._mag["gen_mode"]
+            if mode_changed:
+                logger.warning(
+                    "MagCache uses different ratios per mode for this model. Generation mode changed: %s",
+                    generation_mode,
+                )
+            if steps_changed or mode_changed:
+                apply(
+                    "magcache",
+                    num_steps=num_steps,
+                    mag_ratios=self._mag["mag_ratios"],
+                    mode_name=generation_mode,
+                    thresh=self._mag["thresh"],
+                    K=self._mag["K"],
+                    retention_ratio=self._mag["retention_ratio"],
+                )
+        elif self.mode == "navicache" and self._navi is not None:
+            if self._navi["num_steps"] != num_steps:
+                apply(
+                    "navicache",
+                    num_steps=num_steps,
+                    thresh=self._navi["thresh"],
+                    align_steps=self._navi["align_forwards"] // 2,
+                    process_noise=self._navi["process_noise"],
+                    measurement_noise=self._navi["measurement_noise"],
+                )
+        elif self.mode == "adataylor" and self._ada is not None:
+            if self._ada["num_steps"] != num_steps * 2:
+                apply(
+                    "adataylor",
+                    num_steps=num_steps,
+                    thresh=self._ada["thresh"],
+                    retain=self._ada["retain"],
+                    cooldown=self._ada["cooldown"],
+                    max_hits=self._ada["max_hits"],
+                    extrap=self._ada["extrap"],
+                )
+
     def reset_cache_state(self) -> None:
         if self.mode == "magcache":
             self._reset_mag_state()
         elif self.mode == "navicache":
             self._reset_navi_state()
+        elif self.mode == "adataylor":
+            self._reset_ada_state()
 
     @property
     def last_generation_stats(self) -> dict | None:
@@ -117,6 +195,8 @@ class CacheDiT(MagCache, NaviCache, nn.Module):
             return self._mag.get("last_generation_stats")
         if self.mode == "navicache" and self._navi is not None:
             return self._navi.get("last_generation_stats")
+        if self.mode == "adataylor" and self._ada is not None:
+            return self._ada.get("last_generation_stats")
         return None
 
     # ------------------------------------------------------------------
@@ -128,6 +208,8 @@ class CacheDiT(MagCache, NaviCache, nn.Module):
             return self.module(*args, **kwargs)
         if self.mode == "magcache":
             return self._magcache_forward(*args, **kwargs)
+        if self.mode == "adataylor":
+            return self._adataylor_forward(*args, **kwargs)
         return self._navicache_forward(*args, **kwargs)
 
     def __getattr__(self, name: str):
@@ -141,17 +223,13 @@ class CacheDiT(MagCache, NaviCache, nn.Module):
                 raise
             return getattr(module, name)
 
-
-# CLAUDE.md naming alias
-MagCacheDiT = CacheDiT
-
 __all__ = (
+    "AdaTaylorConfig",
     "CacheConfig",
     "CacheDiT",
     "CacheMode",
     "CacheModeName",
     "MagCacheConfig",
-    "MagCacheDiT",
     "NaviCacheConfig",
     "prepare_mag_ratios",
     "select_mag_ratios",

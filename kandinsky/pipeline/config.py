@@ -30,7 +30,7 @@ from kandinsky_sr.pipeline.config import SRConfig
 from pydantic import Field, field_validator, model_validator
 
 from kandinsky.runtime.base import ConfigModel as _Cfg
-from kandinsky.runtime.cache import CacheConfig, CacheModeName, MagCacheConfig, NaviCacheConfig
+from kandinsky.runtime.cache import AdaTaylorConfig, CacheConfig, CacheModeName, MagCacheConfig, NaviCacheConfig
 from kandinsky.runtime.compile import AotiCompileConfig, CompileConfig
 from kandinsky.runtime.kernels import AttentionConfig
 from kandinsky.runtime.offload import OffloadConfig
@@ -38,6 +38,7 @@ from kandinsky.runtime.profile import ProfileConfig, ProfileMode
 from kandinsky.runtime.sampler import PiFlowConfig
 
 __all__ = (
+    "AdaTaylorConfig",
     "AotiCompileConfig",
     "AttentionConfig",
     "AudioVAEConfig",

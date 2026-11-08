@@ -390,7 +390,7 @@ _HEAT_DARK = (
 
 def _blend(stops: tuple[tuple[float, tuple[int, int, int]], ...], t: float) -> tuple[int, int, int]:
     rgb = stops[-1][1]
-    for (left, start), (right, end) in zip(stops, stops[1:]):
+    for (left, start), (right, end) in zip(stops, stops[1:], strict=False):
         if t <= right:
             blend = 0.0 if right == left else (t - left) / (right - left)
             return tuple(

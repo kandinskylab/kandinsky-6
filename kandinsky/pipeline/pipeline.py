@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, replace
 from functools import wraps
 from pathlib import Path
 
 import torch
 
 from ..core.algo.denoise_loop import denoise_loop
+from ..core.algo.generation import Generation
 from ..core.algo.mux import mux_video_audio
 from ..core.algo.piflow_sampler import piflow_denoise_loop
 from ..core.algo.postprocess_audio import postprocess_audio
@@ -17,7 +19,7 @@ from ..core.algo.prepare_latents import (
     prepare_audio_latents,
     prepare_video_latents,
 )
-from ..core.algo.prepare_ropes import VisualRopeCache, compute_rope1d
+from ..core.algo.prepare_ropes import VisualRopeCache, compute_rope1d, on_device
 from ..core.components.beautifier import NullBeautifier
 from ..core.ports import (
     append_reference_rope,
@@ -35,6 +37,26 @@ from .progress import denoising_progress
 from .reconfigure import reconfigure as _reconfigure
 
 logger = logging.getLogger("kandinsky")
+
+
+@dataclass(frozen=True)
+class _Prepared:
+    request: Generation
+    bundle: LatentBundle
+    text_embeds: dict
+    null_embeds: dict
+    text_cu_seqlens: torch.Tensor
+    null_cu_seqlens: torch.Tensor | None
+    attention_mask: torch.Tensor | None
+    null_attention_mask: torch.Tensor | None
+    visual_rope: torch.Tensor | None
+    audio_rope: torch.Tensor | None
+    text_rope: torch.Tensor | list
+    null_text_rope: torch.Tensor | list | None
+    visual_token_type_ids: torch.Tensor | None
+    captions: list[str]
+    source_frames: torch.Tensor | None
+    source_audio: object | None
 
 _DEFAULT_NEG = (
     "Static, 2D cartoon, cartoon, 2d animation, paintings, images, "
@@ -372,94 +394,66 @@ class Kandinsky6Pipeline:
             image=image,
         )
 
-        explicit_size = height is not None or width is not None
-        height = self.height if height is None else height
-        width = self.width if width is None else width
-        num_steps = self.num_steps if num_steps is None else num_steps
-        guidance_weight = self.guidance_weight if guidance_weight is None else guidance_weight
-        scheduler_scale = self.scheduler_scale if scheduler_scale is None else scheduler_scale
-        scheme = visual_cond_scheme or self.visual_cond_scheme
-        if last_images is not None:
-            scheme = "tail_cond_first_frame"
-
         dit = self.raw_dit
-        do_audio = (
-            sample_audio
-            if sample_audio is not None
-            else bool(getattr(dit, "is_multimodal", False) and self.audio_vae is not None and self.vocoder is not None)
+        request = Generation.from_call(
+            batch_size=batch_size,
+            texts=texts,
+            negative_texts=negative_texts,
+            images=images,
+            last_images=last_images,
+            save_paths=save_paths,
+            seed=seed,
+            height=height,
+            width=width,
+            default_height=self.height,
+            default_width=self.width,
+            num_steps=num_steps,
+            default_num_steps=self.num_steps,
+            guidance_weight=guidance_weight,
+            default_guidance_weight=self.guidance_weight,
+            scheduler_scale=scheduler_scale,
+            default_scheduler_scale=self.scheduler_scale,
+            latent_frames=latent_frames,
+            time_length=time_length,
+            visual_cond_scheme=visual_cond_scheme,
+            pipeline_scheme=self.visual_cond_scheme,
+            sample_audio_arg=sample_audio,
+            multimodal=bool(getattr(dit, "is_multimodal", False)),
+            audio_ready=self.audio_vae is not None and self.vocoder is not None,
+            visual_cond=bool(dit.visual_cond),
+            token_embeddings=int(getattr(dit, "visual_token_type_num_embeddings", 0)),
+            temporal_patch=int(dit.patch_size[0]),
+            piflow_enabled=bool(getattr(self.piflow_conf, "enabled", False)),
+            has_audio_file=audio is not None,
+            has_video_file=video is not None,
+            audio_path=audio,
+            video_path=video,
+            show_progress=show_progress,
         )
-        if conditioned:
-            if not getattr(dit, "is_multimodal", False):
-                raise ValueError("audio/video conditioning requires a multimodal transformer")
-            do_audio = True
-        generate_audio = do_audio and audio is None
-        generate_video = video is None
-        if do_audio and (self.audio_vae is None or self.vocoder is None):
-            raise ValueError("sample_audio=True requires audio_vae and vocoder")
+        self._align_cache(request)
+        prepared = self._prepare(request)
+        bundle = self._denoise(prepared)
+        return self._decode(prepared, bundle)
 
-        piflow_enabled = bool(getattr(self.piflow_conf, "enabled", False))
-        if piflow_enabled:
-            if not do_audio:
-                raise ValueError("piflow.enabled requires sample_audio=True")
-            if abs(guidance_weight - 1.0) > 1e-6:
-                raise ValueError("piflow.enabled requires guidance_weight=1.0")
-
-        generation_mode = self._generation_mode(do_audio=do_audio, image=images)
-
-        if images is not None and scheme == "pretrain" and not dit.visual_cond:
-            raise ValueError("image conditioning requires dit.visual_cond=True")
-        if images is not None and scheme == "tail_cond_first_frame":
-            if getattr(dit, "visual_token_type_num_embeddings", 0) < 2:
-                raise ValueError("tail_cond_first_frame requires dit.visual_token_type_num_embeddings >= 2")
-            if last_images is not None and dit.patch_size[0] != 1:
-                raise ValueError("two reference images require temporal patch_size=1")
-
+    def _align_cache(self, request: Generation) -> None:
         if isinstance(self.dit, CacheDiT) and self.dit.mode != "none":
-            # Keep cache step counters aligned with this generation's schedule.
-            if self.dit.mode == "magcache" and self.dit._mag is not None:
-                mag_steps_changed = bool(self.dit._mag["num_steps"] != num_steps * 2)
-                mag_gen_mode_changed = bool(
-                    self.dit._mag["gen_mode"] is not None and generation_mode != self.dit._mag["gen_mode"]
-                )
-                if mag_gen_mode_changed:
-                    logger.warning(
-                        "MagCache uses different ratios per mode for this model. Generation mode changed: %s",
-                        generation_mode,
-                    )
-                if mag_steps_changed or mag_gen_mode_changed:
-                    self.set_cache(
-                        "magcache",
-                        num_steps=num_steps,
-                        mag_ratios=self.dit._mag["mag_ratios"],
-                        mode_name=generation_mode,
-                        thresh=self.dit._mag["thresh"],
-                        K=self.dit._mag["K"],
-                        retention_ratio=self.dit._mag["retention_ratio"],
-                    )
-            elif self.dit.mode == "navicache" and self.dit._navi is not None:
-                if self.dit._navi["num_steps"] != num_steps:
-                    self.set_cache(
-                        "navicache",
-                        num_steps=num_steps,
-                        thresh=self.dit._navi["thresh"],
-                        align_steps=self.dit._navi["align_forwards"] // 2,
-                        process_noise=self.dit._navi["process_noise"],
-                        measurement_noise=self.dit._navi["measurement_noise"],
-                    )
+            self.dit.align_schedule(request.num_steps, request.generation_mode, apply=self.set_cache)
             self.dit.reset_cache_state()
 
+    def _prepare(self, request: Generation) -> _Prepared:  # noqa: PLR0912, PLR0915
         raw = self.raw_dit
         if hasattr(raw, "clear_text_proj_cache"):
             raw.clear_text_proj_cache()
-
-        # --- optional I2VA first-frame encode (may override height/width) ---
+        dit = raw
+        height = request.height
+        width = request.width
         first_frames = None
         last_frames = None
-        if images is not None:
+        if request.images is not None:
             with self.offload.use("vae", prefetch="text_embedder"):
                 encoded_frames = []
-                for image_item in images:
-                    if explicit_size:
+                for image_item in request.images:
+                    if request.explicit_size:
                         encoded, item_height, item_width = encode_i2va_first_frame(
                             image_item, self.vae, self.device, height=height, width=width
                         )
@@ -477,66 +471,78 @@ class Kandinsky6Pipeline:
                     elif (item_height, item_width) != (height, width):
                         raise ValueError("all batched images must resolve to the same height and width")
                 first_frames = torch.cat(encoded_frames, dim=0)
-                if last_images is not None:
-                    last_frames = torch.cat([
-                        encode_i2va_first_frame(
-                            item, self.vae, self.device, height=height, width=width
-                        )[0] for item in last_images
-                    ], dim=0)
+                if request.last_images is not None:
+                    last_frames = torch.cat(
+                        [
+                            encode_i2va_first_frame(
+                                item, self.vae, self.device, height=height, width=width
+                            )[0]
+                            for item in request.last_images
+                        ],
+                        dim=0,
+                    )
+            request = replace(request, height=height, width=width)
 
-        # Latent grid dimensions
-        H_lat = height // 8
-        W_lat = width // 8
-        if latent_frames is not None:
-            num_frames = latent_frames
-        elif self.latent_frames is not None and time_length is None:
+        h_lat = height // 8
+        w_lat = width // 8
+        if request.latent_frames is not None:
+            num_frames = request.latent_frames
+        elif self.latent_frames is not None and request.time_length is None:
             num_frames = self.latent_frames
         else:
-            tl = 5 if time_length is None else time_length
-            num_frames = tl * 24 // 4 + 1  # temporal compression = 4
-        H_patches = H_lat // dit.patch_size[1]
-        W_patches = W_lat // dit.patch_size[2]
+            duration_s = 5 if request.time_length is None else request.time_length
+            num_frames = duration_s * 24 // 4 + 1
+        h_patches = h_lat // dit.patch_size[1]
+        w_patches = w_lat // dit.patch_size[2]
+        video_duration = num_frames
 
-        decode_names = ("vae", "audio_vae", "vocoder") if do_audio else ("vae",)
         source_frames = None
         source_audio = None
         clean_video = None
         clean_audio = None
-        if video is not None:
+        if request.video_path is not None:
             source_frames = load_video_condition(
-                video, height=height, width=width,
-                num_frames=(num_frames - 1) * 4 + 1, fps=self.fps,
+                request.video_path,
+                height=height,
+                width=width,
+                num_frames=(num_frames - 1) * 4 + 1,
+                fps=self.fps,
             )
             with self.offload.use("vae", prefetch="text_embedder"):
                 clean_video = encode_video_condition(source_frames.to(self.device), self.vae)
-        if audio is not None:
+        if request.audio_path is not None:
             source_audio = load_audio_condition(
-                audio, sample_rate=self.audio_fps, fps=self.fps,
+                request.audio_path,
+                sample_rate=self.audio_fps,
+                fps=self.fps,
                 num_samples=round(((num_frames - 1) * 4 + 1) / self.fps * self.audio_fps),
             )
             with self.offload.use("audio_vae", prefetch="text_embedder"):
-                clean_audio = encode_audio_condition(torch.as_tensor(source_audio, device=self.device), self.audio_vae)
+                clean_audio = encode_audio_condition(
+                    torch.as_tensor(source_audio, device=self.device), self.audio_vae
+                )
 
         with self.offload.use("text_embedder", prefetch="dit"):
             # Qwen stays on CPU until this stage. Expanding outside it runs the
             # beautifier on the host.
             captions = self._expand_captions(
-                texts,
-                images=images,
-                do_audio=do_audio,
-                seed=seed,
+                request.texts,
+                images=request.images,
+                do_audio=request.do_audio,
+                seed=request.seed,
             )
             self.profile.note_prompt(captions[0] if len(captions) == 1 else list(captions))
             text_embeds, text_cu_seqlens, attention_mask = self.text_embedder.encode(captions)
-            # NOTE: piflow use implicit CFG, no need for null entities
-            if piflow_enabled:
+            # PiFlow uses implicit CFG, so the negative prompt is not encoded.
+            if request.piflow:
                 null_embeds, null_cu_seqlens, null_attention_mask = {}, None, None
             else:
-                null_embeds, null_cu_seqlens, null_attention_mask = self.text_embedder.encode(negative_texts)
+                null_embeds, null_cu_seqlens, null_attention_mask = self.text_embedder.encode(
+                    request.negative_texts
+                )
 
-        # Move embeddings / ropes to compute device for DiT (bf16 — no autocast).
-        text_embeds = {k: v.to(device=self.device, dtype=torch.bfloat16) for k, v in text_embeds.items()}
-        null_embeds = {k: v.to(device=self.device, dtype=torch.bfloat16) for k, v in null_embeds.items()}
+        text_embeds = {key: value.to(device=self.device, dtype=torch.bfloat16) for key, value in text_embeds.items()}
+        null_embeds = {key: value.to(device=self.device, dtype=torch.bfloat16) for key, value in null_embeds.items()}
         text_cu_seqlens = text_cu_seqlens.to(self.device)
         if null_cu_seqlens is not None:
             null_cu_seqlens = null_cu_seqlens.to(self.device)
@@ -545,49 +551,67 @@ class Kandinsky6Pipeline:
         if null_attention_mask is not None:
             null_attention_mask = null_attention_mask.to(self.device)
 
-        # --- latents ---
-        video_duration = num_frames
         bundle = prepare_video_latents(
-            bs=batch_size,
+            bs=request.batch_size,
             duration=num_frames,
-            H_lat=H_lat,
-            W_lat=W_lat,
+            H_lat=h_lat,
+            W_lat=w_lat,
             C=dit.in_visual_dim,
-            seed=seed,
+            seed=request.seed,
             device=self.device,
         )
         bundle = LatentBundle(
-            video=(clean_video if clean_video is not None else
-                   bundle.video.reshape(batch_size, num_frames, H_lat, W_lat, dit.in_visual_dim)),
+            video=(
+                clean_video
+                if clean_video is not None
+                else bundle.video.reshape(request.batch_size, num_frames, h_lat, w_lat, dit.in_visual_dim)
+            ),
             audio=bundle.audio,
             video_cu_seqlens=bundle.video_cu_seqlens,
             audio_cu_seqlens=bundle.audio_cu_seqlens,
         )
 
         visual_token_type_ids = None
-        generated_visual_mask = None
-        if first_frames is not None and scheme == "tail_cond_first_frame":
+        if first_frames is not None and request.image.kind == "tail":
             references = first_frames[:, None]
+            loop_frames = first_frames
             if last_frames is not None:
                 references = torch.stack([first_frames, last_frames], dim=1)
-                first_frames = references
-            video, visual_token_type_ids, generated_visual_mask = append_visual_references(
-                bundle.video, references, batch_size=batch_size, video_duration=video_duration
+                loop_frames = references
+            video, visual_token_type_ids, generated_mask = append_visual_references(
+                bundle.video,
+                references,
+                batch_size=request.batch_size,
+                video_duration=video_duration,
             )
             duration_with_ref = video_duration + references.shape[1]
-            cu = duration_with_ref * torch.arange(batch_size + 1, dtype=torch.int32, device=self.device)
+            offsets = duration_with_ref * torch.arange(
+                request.batch_size + 1, dtype=torch.int32, device=self.device
+            )
             bundle = LatentBundle(
                 video=video,
                 audio=None,
-                video_cu_seqlens=cu,
+                video_cu_seqlens=offsets,
                 audio_cu_seqlens=None,
             )
-            num_frames = duration_with_ref
-        elif first_frames is not None and scheme in ("pretrain", "i2v"):
-            pass  # first_frames injected inside denoise_loop via visual_cond_scheme
+            request = replace(
+                request,
+                image=request.image.with_frames(loop_frames),
+                generated_mask=generated_mask,
+                video_duration=video_duration,
+                reference_rope_count=int(references.shape[1]),
+            )
+        elif first_frames is not None:
+            request = replace(
+                request,
+                image=request.image.with_frames(first_frames),
+                video_duration=video_duration,
+            )
+        else:
+            request = replace(request, video_duration=video_duration)
 
         audio_len = None
-        if do_audio:
+        if request.do_audio:
             downsample = int(getattr(self.audio_vae, "downsample_factor", 1024))
             # Audio length follows generated frames only (exclude tail reference).
             audio_dur = audio_latent_duration(
@@ -602,122 +626,151 @@ class Kandinsky6Pipeline:
                 bundle,
                 audio_duration=audio_dur,
                 audio_dim=dit.in_audio_dim,
-                seed=seed,
+                seed=request.seed,
                 device=self.device,
             )
             bundle = LatentBundle(
                 video=bundle.video,
-                audio=(clean_audio if clean_audio is not None else
-                       bundle.audio.reshape(batch_size, audio_dur, dit.in_audio_dim)),
+                audio=(
+                    clean_audio
+                    if clean_audio is not None
+                    else bundle.audio.reshape(request.batch_size, audio_dur, dit.in_audio_dim)
+                ),
                 video_cu_seqlens=bundle.video_cu_seqlens,
                 audio_cu_seqlens=bundle.audio_cu_seqlens,
             )
             audio_len = int(audio_dur)
 
-        # --- denoise ---
-        progress_bar = denoising_progress(num_steps) if show_progress else None
+        # Generated frames use positions 0..T-1. A tail reference reuses position 0.
+        t_rope = video_duration // dit.patch_size[0]
+        visual_rope, audio_rope, text_rope, null_text_rope = self._materialize_ropes(
+            T_rope=t_rope,
+            H_patches=h_patches,
+            W_patches=w_patches,
+            text_len=(
+                text_embeds["text_embeds"].shape[1]
+                if text_embeds["text_embeds"].ndim == 3
+                else int(text_cu_seqlens[-1].item())
+            ),
+            null_text_len=(
+                0
+                if null_cu_seqlens is None
+                else (
+                    null_embeds["text_embeds"].shape[1]
+                    if null_embeds["text_embeds"].ndim == 3
+                    else int(null_cu_seqlens[-1].item())
+                )
+            ),
+            audio_len=audio_len,
+        )
+        if request.reference_rope_count:
+            visual_rope = append_reference_rope(visual_rope, request.reference_rope_count)
+        visual_rope = on_device(visual_rope, self.device)
+        audio_rope = on_device(audio_rope, self.device)
+        text_rope = on_device(text_rope, self.device)
+        null_text_rope = on_device(null_text_rope, self.device)
 
+        return _Prepared(
+            request=request,
+            bundle=bundle,
+            text_embeds=text_embeds,
+            null_embeds=null_embeds,
+            text_cu_seqlens=text_cu_seqlens,
+            null_cu_seqlens=null_cu_seqlens,
+            attention_mask=attention_mask,
+            null_attention_mask=null_attention_mask,
+            visual_rope=visual_rope,
+            audio_rope=audio_rope,
+            text_rope=text_rope,
+            null_text_rope=null_text_rope,
+            visual_token_type_ids=visual_token_type_ids,
+            captions=list(captions),
+            source_frames=source_frames,
+            source_audio=source_audio,
+        )
+
+    def _denoise(self, prepared: _Prepared) -> LatentBundle:
+        request = prepared.request
+        progress_bar = denoising_progress(request.num_steps) if request.show_progress else None
+        decode_names = ("vae", "audio_vae", "vocoder") if request.do_audio else ("vae",)
+        callback = progress_bar.update if progress_bar is not None else None
         try:
             with self.offload.use("dit", prefetch=decode_names):
-                # RoPE: generated frames use 0..T-1; tail reference reuses position 0 (K5).
-                T_rope = video_duration // dit.patch_size[0]
-                visual_rope, audio_rope, text_rope, null_text_rope = self._materialize_ropes(
-                    T_rope=T_rope,
-                    H_patches=H_patches,
-                    W_patches=W_patches,
-                    text_len=(
-                        text_embeds["text_embeds"].shape[1]
-                        if text_embeds["text_embeds"].ndim == 3
-                        else int(text_cu_seqlens[-1].item())
-                    ),
-                    null_text_len=(
-                        0
-                        if null_cu_seqlens is None
-                        else (
-                            null_embeds["text_embeds"].shape[1]
-                            if null_embeds["text_embeds"].ndim == 3
-                            else int(null_cu_seqlens[-1].item())
-                        )
-                    ),
-                    audio_len=audio_len,
-                )
-                if scheme == "tail_cond_first_frame" and images is not None:
-                    visual_rope = append_reference_rope(visual_rope, references.shape[1])
-
-                if piflow_enabled:
-                    result_bundle = piflow_denoise_loop(
-                        bundle=bundle,
+                if request.piflow:
+                    return piflow_denoise_loop(
+                        bundle=prepared.bundle,
                         dit=self.dit,
-                        text_embeds=text_embeds,
-                        visual_rope=visual_rope,
-                        audio_rope=audio_rope,
-                        text_rope=text_rope,
-                        num_steps=num_steps,
-                        scheduler_scale=scheduler_scale,
-                        first_frames=first_frames,
-                        visual_cond_scheme=scheme,
-                        sample_audio=generate_audio,
-                        sample_video=generate_video,
-                        attention_mask=attention_mask,
-                        visual_token_type_ids=visual_token_type_ids,
+                        text_embeds=prepared.text_embeds,
+                        visual_rope=prepared.visual_rope,
+                        audio_rope=prepared.audio_rope,
+                        text_rope=prepared.text_rope,
+                        num_steps=request.num_steps,
+                        scheduler_scale=request.scheduler_scale,
+                        image=request.image,
+                        sample_audio=request.sample_audio,
+                        sample_video=request.sample_video,
+                        attention_mask=prepared.attention_mask,
+                        visual_token_type_ids=prepared.visual_token_type_ids,
                         scale_factor=self.scale_factor,
                         eps=self.piflow_conf.eps,
                         final_step_size_scale=self.piflow_conf.final_step_size_scale,
                         shift=self.piflow_conf.shift,
                         num_policy_substeps=self.piflow_conf.num_policy_substeps,
-                        progress_callback=progress_bar.update if progress_bar is not None else None,
+                        progress_callback=callback,
                     )
-                else:
-                    result_bundle = denoise_loop(
-                        bundle=bundle,
-                        dit=self.dit,
-                        text_embeds=text_embeds,
-                        null_text_embeds=null_embeds,
-                        visual_rope=visual_rope,
-                        audio_rope=audio_rope,
-                        text_rope=text_rope,
-                        null_text_rope=null_text_rope,
-                        num_steps=num_steps,
-                        guidance_weight=guidance_weight,
-                        scheduler_scale=scheduler_scale,
-                        first_frames=first_frames,
-                        visual_cond_scheme=scheme,
-                        sample_audio=generate_audio,
-                        sample_video=generate_video,
-                        attention_mask=attention_mask,
-                        null_attention_mask=null_attention_mask,
-                        visual_token_type_ids=visual_token_type_ids,
-                        scale_factor=self.scale_factor,
-                        progress_callback=progress_bar.update if progress_bar is not None else None,
-                    )
+                return denoise_loop(
+                    bundle=prepared.bundle,
+                    dit=self.dit,
+                    text_embeds=prepared.text_embeds,
+                    null_text_embeds=prepared.null_embeds,
+                    visual_rope=prepared.visual_rope,
+                    audio_rope=prepared.audio_rope,
+                    text_rope=prepared.text_rope,
+                    null_text_rope=prepared.null_text_rope,
+                    num_steps=request.num_steps,
+                    guidance_weight=request.guidance_weight,
+                    scheduler_scale=request.scheduler_scale,
+                    image=request.image,
+                    sample_audio=request.sample_audio,
+                    sample_video=request.sample_video,
+                    attention_mask=prepared.attention_mask,
+                    null_attention_mask=prepared.null_attention_mask,
+                    visual_token_type_ids=prepared.visual_token_type_ids,
+                    scale_factor=self.scale_factor,
+                    progress_callback=callback,
+                )
         finally:
             if progress_bar is not None:
                 progress_bar.close()
 
-        if generated_visual_mask is not None and result_bundle.video is not None:
-            generated_video = (
-                result_bundle.video[:, generated_visual_mask[0]]
-                if result_bundle.video.ndim == 5
-                else result_bundle.video[generated_visual_mask]
-            )
-            result_bundle = LatentBundle(
-                video=generated_video,
-                audio=result_bundle.audio,
-                video_cu_seqlens=video_duration * torch.arange(batch_size + 1, dtype=torch.int32, device=self.device),
-                audio_cu_seqlens=result_bundle.audio_cu_seqlens,
-            )
-
-        # --- decode ---
+    def _decode(self, prepared: _Prepared, bundle: LatentBundle) -> Kandinsky6PipelineOutput:
+        request = prepared.request
+        duration = request.video_duration if request.video_duration is not None else 0
+        bundle = request.image.crop_generated(
+            bundle,
+            request.generated_mask,
+            batch_size=request.batch_size,
+            generated_duration=duration,
+            device=self.device,
+        )
+        decode_names = ("vae", "audio_vae", "vocoder") if request.do_audio else ("vae",)
         with self.offload.use(*decode_names):
-            frames = (source_frames if source_frames is not None else
-                      postprocess_video(result_bundle, self.vae, bs=batch_size))
-            audio = ([source_audio] if source_audio is not None else
-                     postprocess_audio(result_bundle, self.audio_vae, self.vocoder) if do_audio else None)
+            frames = (
+                prepared.source_frames
+                if prepared.source_frames is not None
+                else postprocess_video(bundle, self.vae, bs=request.batch_size)
+            )
+            if prepared.source_audio is not None:
+                audio = [prepared.source_audio]
+            elif request.do_audio:
+                audio = postprocess_audio(bundle, self.audio_vae, self.vocoder)
+            else:
+                audio = None
 
         path = None
-        if save_paths is not None:
+        if request.save_paths is not None:
             paths = []
-            for index, output_path in enumerate(save_paths):
+            for index, output_path in enumerate(request.save_paths):
                 saved = mux_video_audio(
                     frames[index],
                     None if audio is None else audio[index],
@@ -726,7 +779,7 @@ class Kandinsky6Pipeline:
                     audio_sample_rate=self.audio_fps,
                 )
                 paths.append(str(saved))
-                write_expanded_prompt(saved, captions[index])
-            path = paths[0] if batch_size == 1 else paths
+                write_expanded_prompt(saved, prepared.captions[index])
+            path = paths[0] if request.batch_size == 1 else paths
 
-        return Kandinsky6PipelineOutput(frames=frames, audio=audio, path=path, prompts=list(captions))
+        return Kandinsky6PipelineOutput(frames=frames, audio=audio, path=path, prompts=list(prepared.captions))

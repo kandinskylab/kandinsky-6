@@ -5,9 +5,8 @@ from __future__ import annotations
 import torch
 
 from ..types import LatentBundle, TextEmbeds
-from .denoise_loop import _build_video_input
+from .generation import ImageCondition
 from .piflow_math import MultimodalDXPolicy, policy_rollout_fm, shift_timesteps
-from .visual_conditioning import restore_tail_references
 
 
 def _normalize_grid_prediction(prediction: torch.Tensor, state: torch.Tensor, name: str) -> torch.Tensor:
@@ -49,8 +48,7 @@ def piflow_denoise_loop(  # noqa: PLR0913, PLR0915
     text_rope: torch.Tensor | list[torch.Tensor],
     num_steps: int,
     scheduler_scale: float,
-    first_frames: torch.Tensor | None = None,
-    visual_cond_scheme: str = "pretrain",
+    image: ImageCondition | None = None,
     sample_video: bool = True,
     sample_audio: bool = True,
     *,
@@ -87,7 +85,7 @@ def piflow_denoise_loop(  # noqa: PLR0913, PLR0915
     base_segment_size = 1.0 / (float(num_steps) - one_minus_final)
     batch_size = video_cu_seqlens.shape[0] - 1
     raw_t_src = torch.ones(batch_size, device=device, dtype=torch.float32)
-    tail_frames = first_frames if visual_cond_scheme == "tail_cond_first_frame" else None
+    image = image if image is not None else ImageCondition.parse("pretrain")
 
     video_time_scale = 1000.0 if sample_video else 0.0
     audio_time_scale = 1000.0 if sample_audio else 0.0
@@ -98,12 +96,10 @@ def piflow_denoise_loop(  # noqa: PLR0913, PLR0915
         tau_src = raw_t_src
         tau_dst = (tau_src - segment_size).clamp(min=eps)
         sigma_t_src = shift_timesteps(tau_src, shift)
-        model_input_v = _build_video_input(
+        model_input_v = image.apply(
             video,
-            dit.visual_cond,
-            first_frames,
-            video_cu_seqlens,
-            visual_cond_scheme,
+            has_visual_cond=bool(dit.visual_cond),
+            cu_seqlens=video_cu_seqlens,
         )
         pred_video, pred_audio = dit(
             x_video=model_input_v,
@@ -177,27 +173,11 @@ def piflow_denoise_loop(  # noqa: PLR0913, PLR0915
                 policy.policy_A,
             )
         raw_t_src = tau_dst
-        restore_tail_references(video, tail_frames, video_cu_seqlens)
+        image.restore_after_step(video, video_cu_seqlens)
         if progress_callback is not None:
             progress_callback()
 
-    if (
-        visual_cond_scheme in ("i2v", "tail_cond_first_frame")
-        and first_frames is not None
-    ):
-        reference_positions = (
-            video_cu_seqlens[:-1]
-            if visual_cond_scheme == "i2v"
-            else video_cu_seqlens[1:] - 1
-        )
-        if visual_cond_scheme == "tail_cond_first_frame":
-            restore_tail_references(video, first_frames, video_cu_seqlens)
-        elif video.ndim == 5:
-            video[:, 0 if visual_cond_scheme == "i2v" else -1] = first_frames.to(
-                device=device, dtype=video.dtype
-            )
-        else:
-            video[reference_positions] = first_frames.to(device=device, dtype=video.dtype)
+    image.pin(video, video_cu_seqlens)
     return LatentBundle(
         video=video,
         audio=audio,

@@ -15,6 +15,7 @@ MagiCompiler, or another optional acceleration dependency.
 from .algo.conditioning import encode_audio_condition, encode_video_condition
 from .algo.denoise_loop import denoise_loop
 from .algo.flow_matching import flow_match_timesteps
+from .algo.generation import ImageCondition
 from .algo.guidance import apply_cfg
 from .algo.postprocess_audio import postprocess_audio
 from .algo.postprocess_video import postprocess_video
@@ -48,6 +49,7 @@ __all__ = (
     "encode_audio_condition",
     "encode_video_condition",
     "flow_match_timesteps",
+    "ImageCondition",
     "postprocess_audio",
     "postprocess_video",
     "prepare_audio_latents",

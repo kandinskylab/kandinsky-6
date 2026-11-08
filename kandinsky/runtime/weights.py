@@ -145,6 +145,21 @@ def _local_snapshot(kwargs: dict[str, str]) -> Path | None:
         return None
 
 
+def _ref_snapshot(cache_root: Path, repo_id: str, revision: str | None) -> Path | None:
+    """Snapshot directory named by ``refs/<revision>``, ignoring other Hub files.
+
+    ``snapshot_download(local_files_only=True)`` raises when any repo file is
+    absent, including logos the pipeline never opens. A revision whose weight
+    files are already on disk is usable without a network call.
+    """
+    repo = cache_root / ("models--" + repo_id.replace("/", "--"))
+    ref = repo / "refs" / ("main" if revision is None else revision)
+    if not ref.is_file():
+        return None
+    snapshot = repo / "snapshots" / ref.read_text(encoding="utf-8").strip()
+    return snapshot if snapshot.is_dir() else None
+
+
 def _ensure_snapshot(
     spec: Checkpoint,
     cache_root: Path,
@@ -156,6 +171,8 @@ def _ensure_snapshot(
     if revision is not None:
         kwargs["revision"] = revision
     path = _local_snapshot(kwargs)
+    if path is None:
+        path = _ref_snapshot(cache_root, spec.repo_id, revision)
     if path is not None and ready(path):
         logger.info("%s is already on disk", spec.repo_id)
         return path
