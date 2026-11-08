@@ -37,8 +37,10 @@ from pathlib import Path
 import torch
 import yaml
 
+from collections.abc import Sequence
+
 from kandinsky.tools.bench_report import write_module_time_report
-from kandinsky.pipeline.config import load_config
+from kandinsky.pipeline.config import _deep_merge, _read_mapping, _resolve_token, load_config
 from kandinsky.runtime.home import kandinsky_home
 from kandinsky.runtime.offload import OffloadStrategy
 
@@ -209,16 +211,58 @@ def cell_document(checkpoint: str, resolution: Resolution) -> dict:
     return document
 
 
-def write_plan(directory: Path) -> list[Group]:
-    """Write one YAML per cell and group them by checkpoint."""
+def _accel_documents(accel: Sequence[str]) -> list[tuple[str, dict]]:
+    """Resolve each acceleration token to its YAML mapping, left-to-right.
+
+    ``configs/accelerations/<token>.yaml`` is deep-merged into every cell by
+    :func:`write_plan`. Resolution raises the same error as token composition
+    (missing / ambiguous / wrong folder).
+    """
+    resolved: list[tuple[str, dict]] = []
+    for token in accel:
+        path = _resolve_token(token)
+        if path.parent.name != "accelerations":
+            raise ValueError(f"--accel expects a token from configs/accelerations/, got {token!r} in {path.parent.name}/")
+        resolved.append((token, _read_mapping(path)))
+    return resolved
+
+
+def _accel_cell_name(checkpoint: str, resolution_name: str, accel: Sequence[str]) -> str:
+    if not accel:
+        return f"{checkpoint}-{resolution_name}"
+    tokens = "+".join(accel)
+    return f"{checkpoint}-{tokens}-{resolution_name}"
+
+
+def write_plan(
+    directory: Path,
+    *,
+    only: Sequence[str] | None = None,
+    accel: Sequence[str] | None = None,
+) -> list[Group]:
+    """Write one YAML per cell and group them by checkpoint.
+
+    ``only`` keeps the cells whose base name (``<checkpoint>-<resolution>``)
+    appears in the sequence. ``accel`` resolves one or more acceleration tokens
+    from ``configs/accelerations/`` and deep-merges them into each cell;
+    cells are renamed to include the acceleration tokens.
+    """
     directory.mkdir(parents=True, exist_ok=True)
+    only_set = set(only) if only else None
+    overlays = _accel_documents(accel or ())
     groups: list[Group] = []
     for checkpoint in CHECKPOINTS:
         jobs: list[Job] = []
         for resolution in RESOLUTIONS:
-            name = f"{checkpoint}-{resolution.name}"
+            base_name = f"{checkpoint}-{resolution.name}"
+            if only_set is not None and base_name not in only_set:
+                continue
+            document = cell_document(checkpoint, resolution)
+            for _, overlay in overlays:
+                document = _deep_merge(document, overlay)
+            name = _accel_cell_name(checkpoint, resolution.name, [token for token, _ in overlays])
             path = directory / f"{name}.yaml"
-            body = yaml.safe_dump(cell_document(checkpoint, resolution), sort_keys=False)
+            body = yaml.safe_dump(document, sort_keys=False)
             path.write_text(f"# {name} t2v\n{body}", encoding="utf-8")
             jobs.append(
                 Job(
@@ -229,7 +273,13 @@ def write_plan(directory: Path) -> list[Group]:
                     sr=resolution.scale is not None,
                 )
             )
-        groups.append(Group(checkpoint=checkpoint, jobs=tuple(jobs)))
+        if jobs:
+            groups.append(Group(checkpoint=checkpoint, jobs=tuple(jobs)))
+    if only_set is not None:
+        matched = {f"{group.checkpoint}-{job.resolution}" for group in groups for job in group.jobs}
+        missing = only_set - matched
+        if missing:
+            raise ValueError(f"--only names not in the bench matrix: {sorted(missing)}")
     return groups
 
 
@@ -572,8 +622,15 @@ def run(
     prompt: str | None = None,
     seed: int = DEFAULT_SEED,
     mem_threshold: int = _FREE_GPU_THRESHOLD_MIB,
+    only: Sequence[str] | None = None,
+    accel: Sequence[str] | None = None,
 ) -> int:
-    """Run the eight cells. Returns a process status code."""
+    """Run the eight cells. Returns a process status code.
+
+    ``only`` and ``accel`` narrow the matrix: ``--only pro-sd --accel spd``
+    runs one cell with the SPEED acceleration deep-merged on top of the usual
+    ``cell_document``.
+    """
     text = DEFAULT_PROMPT if prompt is None else prompt
     home = kandinsky_home()
     home.mkdir(parents=True, exist_ok=True)
@@ -583,7 +640,7 @@ def run(
 
     run_dir = _open_run(home)
     profiles = bind_run_profiles(run_dir)
-    groups = write_plan(run_dir / "configs")
+    groups = write_plan(run_dir / "configs", only=only, accel=accel)
     _write_launch(run_dir, groups, text, seed)
 
     for group in groups:

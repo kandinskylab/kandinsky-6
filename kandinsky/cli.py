@@ -346,6 +346,8 @@ def bench(
     prompt: str | None = None,
     seed: int = 0,
     mem_threshold: int = 1000,
+    only: Annotated[list[str] | None, cyclopts.Parameter(consume_multiple=True)] = None,
+    accel: Annotated[list[str] | None, cyclopts.Parameter(consume_multiple=True)] = None,
 ) -> None:
     """Time eight t2v generations on one GPU.
 
@@ -358,10 +360,22 @@ def bench(
     ``profiles/`` inside ``$KANDINSKY_HOME/outputs/bench_<date-time>/``.
     That folder also receives ``module-time-report.html``.
     ``--gpu`` selects one card. When it is omitted, the first free GPU is used.
+    ``--only pro-sd`` keeps a single cell; repeatable. ``--accel spd``
+    deep-merges ``configs/accelerations/spd.yaml`` into every cell and renames
+    it accordingly (e.g. ``pro-spd-sd``); repeatable.
     """
     from kandinsky.tools.bench import run
 
-    raise SystemExit(run(gpu=gpu, prompt=prompt, seed=seed, mem_threshold=mem_threshold))
+    raise SystemExit(
+        run(
+            gpu=gpu,
+            prompt=prompt,
+            seed=seed,
+            mem_threshold=mem_threshold,
+            only=only,
+            accel=accel,
+        )
+    )
 
 
 @app.command
