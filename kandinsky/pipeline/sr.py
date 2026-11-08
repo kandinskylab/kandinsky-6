@@ -8,6 +8,7 @@ the K6 offload handle, and hands both to :func:`kandinsky_sr.pipeline.factory.lo
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ from kandinsky.pipeline.config import PipelineConfig, load_config
 
 
 def load_sr_pipeline(  # noqa: PLR0913
-    config: PipelineConfig | str | Path,
+    config: PipelineConfig | str | Path | Sequence[str],
     device: str | torch.device,
     *,
     force: bool = False,
@@ -38,7 +39,7 @@ def load_sr_pipeline(  # noqa: PLR0913
     ``offload_strategy`` is passed explicitly. Returns ``None`` when SR is
     disabled and not forced.
     """
-    cfg = load_config(config) if isinstance(config, (str, Path)) else config
+    cfg = config if isinstance(config, PipelineConfig) else load_config(config)
     if not force and not cfg.sr.enabled:
         return None
 

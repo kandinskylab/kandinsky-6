@@ -7,10 +7,14 @@ from pathlib import Path
 
 import torch
 
+from ..core.algo.dct import dct_spatial_resize_bhwc
 from ..core.algo.denoise_loop import denoise_loop
+from ..core.algo.denoise_speed import denoise_speed
+from ..core.algo.flow_matching import flow_match_timesteps
 from ..core.algo.generation import Generation
 from ..core.algo.mux import mux_video_audio
 from ..core.algo.piflow_sampler import piflow_denoise_loop
+from ..core.algo.speed_schedule import SpeedStage, plan_stages
 from ..core.algo.postprocess_audio import postprocess_audio
 from ..core.algo.postprocess_video import postprocess_video
 from ..core.algo.prepare_latents import (
@@ -31,6 +35,7 @@ from ..core.types import Kandinsky6PipelineOutput, LatentBundle
 from ..runtime.cache import CacheDiT, CacheMode
 from ..runtime.offload import NoOpOffload, OffloadHandle, OffloadStrategy
 from ..runtime.profile import NoOpProfile
+from ..runtime.speed import SpeedConfig
 from .config import CacheConfig, MagCacheConfig, NaviCacheConfig, PipelineConfig
 from .media import load_audio_condition, load_video_condition
 from .progress import denoising_progress
@@ -57,6 +62,13 @@ class _Prepared:
     captions: list[str]
     source_frames: torch.Tensor | None
     source_audio: object | None
+    # SPEED-only; set when ``self.speed_conf.enabled`` and consumed by ``_denoise``.
+    speed_stages: list[SpeedStage] | None = None
+    speed_timesteps: torch.Tensor | None = None
+    speed_h_patches_full: int | None = None
+    speed_w_patches_full: int | None = None
+    speed_t_rope: int | None = None
+
 
 _DEFAULT_NEG = (
     "Static, 2D cartoon, cartoon, 2d animation, paintings, images, "
@@ -150,6 +162,7 @@ class Kandinsky6Pipeline:
         max_area: int | None = None,
         image_divisibility: int = 16,
         piflow_conf=None,
+        speed_conf: SpeedConfig | dict | None = None,
     ):
         self.dit = dit
         self.text_embedder = text_embedder
@@ -171,6 +184,12 @@ class Kandinsky6Pipeline:
         self.max_area = max_area if max_area is not None else height * width
         self.image_divisibility = image_divisibility
         self.piflow_conf = piflow_conf
+        if speed_conf is None:
+            self.speed_conf = SpeedConfig()
+        elif isinstance(speed_conf, SpeedConfig):
+            self.speed_conf = speed_conf
+        else:
+            self.speed_conf = SpeedConfig.model_validate(speed_conf)
         self.offload: OffloadHandle = offload if offload is not None else NoOpOffload()
         self.profile = NoOpProfile()
         if cache_conf is None:
@@ -496,6 +515,45 @@ class Kandinsky6Pipeline:
         w_patches = w_lat // dit.patch_size[2]
         video_duration = num_frames
 
+        # SPEED: plan stages at the full latent canvas, then shrink the initial
+        # bundle (and any reference frames) to stage 0 so the first denoising
+        # pass runs at the right grid.
+        h_lat_full, w_lat_full = h_lat, w_lat
+        h_patches_full, w_patches_full = h_patches, w_patches
+        t_rope_full = video_duration // dit.patch_size[0]
+        speed_stages: list[SpeedStage] | None = None
+        speed_timesteps: torch.Tensor | None = None
+        if self.speed_conf.enabled:
+            if request.batch_size != 1:
+                raise ValueError("speed.enabled requires batch size 1")
+            if request.piflow:
+                raise ValueError("speed.enabled is incompatible with piflow.enabled")
+            if request.video_path is not None or request.audio_path is not None:
+                raise ValueError("speed.enabled is incompatible with audio/video conditioning")
+            speed_timesteps = flow_match_timesteps(
+                request.num_steps, request.scheduler_scale, self.device
+            )
+            speed_stages = plan_stages(
+                self.speed_conf.scales,
+                speed_timesteps.tolist(),
+                h_lat_full,
+                w_lat_full,
+                dit.patch_size,
+                transition_times=self.speed_conf.transition_times,
+                delta=self.speed_conf.delta,
+                spectrum_a=self.speed_conf.spectrum_a,
+                spectrum_beta=self.speed_conf.spectrum_beta,
+            )
+            stage0_h, stage0_w = speed_stages[0].latent_hw
+            if first_frames is not None and (stage0_h, stage0_w) != (h_lat_full, w_lat_full):
+                first_frames = dct_spatial_resize_bhwc(first_frames, (stage0_h, stage0_w))
+                if last_frames is not None:
+                    last_frames = dct_spatial_resize_bhwc(last_frames, (stage0_h, stage0_w))
+            h_lat = stage0_h
+            w_lat = stage0_w
+            h_patches = h_lat // dit.patch_size[1]
+            w_patches = w_lat // dit.patch_size[2]
+
         source_frames = None
         source_audio = None
         clean_video = None
@@ -642,11 +700,15 @@ class Kandinsky6Pipeline:
             audio_len = int(audio_dur)
 
         # Generated frames use positions 0..T-1. A tail reference reuses position 0.
+        # SPEED builds the visual rope per stage; prime the cache at the full
+        # canvas here so later slices are hits.
         t_rope = video_duration // dit.patch_size[0]
+        rope_h_patches = h_patches_full if self.speed_conf.enabled else h_patches
+        rope_w_patches = w_patches_full if self.speed_conf.enabled else w_patches
         visual_rope, audio_rope, text_rope, null_text_rope = self._materialize_ropes(
             T_rope=t_rope,
-            H_patches=h_patches,
-            W_patches=w_patches,
+            H_patches=rope_h_patches,
+            W_patches=rope_w_patches,
             text_len=(
                 text_embeds["text_embeds"].shape[1]
                 if text_embeds["text_embeds"].ndim == 3
@@ -663,8 +725,13 @@ class Kandinsky6Pipeline:
             ),
             audio_len=audio_len,
         )
-        if request.reference_rope_count:
+        if request.reference_rope_count and not self.speed_conf.enabled:
+            # denoise_speed appends the reference slot per stage; skip here.
             visual_rope = append_reference_rope(visual_rope, request.reference_rope_count)
+        if self.speed_conf.enabled:
+            # Full-canvas rope is only used to prime the cache; denoise_speed
+            # queries the cache per stage.
+            visual_rope = None
         visual_rope = on_device(visual_rope, self.device)
         audio_rope = on_device(audio_rope, self.device)
         text_rope = on_device(text_rope, self.device)
@@ -687,6 +754,11 @@ class Kandinsky6Pipeline:
             captions=list(captions),
             source_frames=source_frames,
             source_audio=source_audio,
+            speed_stages=speed_stages,
+            speed_timesteps=speed_timesteps,
+            speed_h_patches_full=h_patches_full if self.speed_conf.enabled else None,
+            speed_w_patches_full=w_patches_full if self.speed_conf.enabled else None,
+            speed_t_rope=t_rope_full if self.speed_conf.enabled else None,
         )
 
     def _denoise(self, prepared: _Prepared) -> LatentBundle:
@@ -696,6 +768,8 @@ class Kandinsky6Pipeline:
         callback = progress_bar.update if progress_bar is not None else None
         try:
             with self.offload.use("dit", prefetch=decode_names):
+                if self.speed_conf.enabled:
+                    return self._denoise_speed(prepared, callback)
                 if request.piflow:
                     return piflow_denoise_loop(
                         bundle=prepared.bundle,
@@ -742,6 +816,48 @@ class Kandinsky6Pipeline:
         finally:
             if progress_bar is not None:
                 progress_bar.close()
+
+    def _denoise_speed(self, prepared: _Prepared, callback) -> LatentBundle:
+        """Staged SPEED denoising. Caller holds ``offload.use('dit', ...)``."""
+        if prepared.speed_stages is None or prepared.speed_timesteps is None:
+            raise RuntimeError("speed.enabled but _prepare did not produce a SPEED plan")
+        request = prepared.request
+        dit_raw = self.raw_dit
+        scale = (
+            float(self.scale_factor[0]),
+            float(self.scale_factor[1]),
+            float(self.scale_factor[2]),
+        )
+        t_rope = prepared.speed_t_rope
+
+        def build_visual_rope(h_patches: int, w_patches: int) -> torch.Tensor:
+            return self._visual_rope_cache.get(
+                dit_raw.visual_rope, (t_rope, h_patches, w_patches), scale
+            ).to(self.device)
+
+        return denoise_speed(
+            bundle=prepared.bundle,
+            dit=self.dit,
+            stages=prepared.speed_stages,
+            timesteps=prepared.speed_timesteps,
+            text_embeds=prepared.text_embeds,
+            null_text_embeds=prepared.null_embeds,
+            build_visual_rope=build_visual_rope,
+            audio_rope=prepared.audio_rope,
+            text_rope=prepared.text_rope,
+            null_text_rope=prepared.null_text_rope,
+            guidance_weight=request.guidance_weight,
+            patch_size=dit_raw.patch_size,
+            seed=request.seed,
+            audio_alignment=self.speed_conf.audio_alignment,
+            audio_alignment_substeps=self.speed_conf.audio_alignment_substeps,
+            attention_mask=prepared.attention_mask,
+            null_attention_mask=prepared.null_attention_mask,
+            visual_token_type_ids=prepared.visual_token_type_ids,
+            scale_factor=self.scale_factor,
+            image=request.image,
+            progress_callback=callback,
+        )
 
     def _decode(self, prepared: _Prepared, bundle: LatentBundle) -> Kandinsky6PipelineOutput:
         request = prepared.request

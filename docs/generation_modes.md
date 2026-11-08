@@ -6,6 +6,10 @@ The native pipeline generates from a text prompt. An image, a second image, an a
 from kandinsky import get_pipeline
 
 pipe = get_pipeline("kandinsky/configs/devices/rtx-4090.yaml")
+# Equivalent token form:
+# pipe = get_pipeline(["rtx-4090"])
+# With an acceleration preset layered on top:
+# pipe = get_pipeline(["rtx-4090", "spd"])
 ```
 
 `just generate` reads the same preset. Anything after the prompt is a `kandy generate` flag.
@@ -122,12 +126,13 @@ These two calls accept one media file and one prompt.
 ## Shared command flags
 
 ```bash
-just generate 'A cat turns toward the camera.' --config kandinsky/configs/devices/rtx-5090.yaml --out clip.mp4
+just generate 'A cat turns toward the camera.' --configs rtx-5090 --out clip.mp4
 ```
 
 | Flag | Role |
 |---|---|
-| `--config` | YAML preset. The default is `kandinsky/configs/devices/h100.yaml` |
+| `--configs` | Preset tokens from `configs/{devices,checkpoints,accelerations}`, deep-merged left to right. The default is `--configs h100` |
+| `--config` | One YAML path. Excludes `--configs` |
 | `--out` | Output file. Skips the stamped run directory |
 | `--image` | One reference image |
 | `--last-image` | Last reference. Requires `--image` |

@@ -35,6 +35,7 @@ and Kandinsky 6.0 Video Pro (29B parameters). Both models generate 5-second vide
 
 ## Project Updates
 
+- 2026/11/08: Added [SPEED](https://arxiv.org/abs/2605.18736), a spectral progressive diffusion strategy, as an acceleration preset. It wraps the base sampler in a staged loop that denoises at progressively higher spatial resolutions, with stage boundaries derived from a radial power-law spectrum fitted to the VAE latents. Enable it with `just generate '...' --configs h100 spd`; the preset switches to the Pro checkpoint for the base sampler.
 - 2026/10/25: The native pipeline now generates from a first and last frame, from an audio file, and from a video file. The calls and `just generate` flags are in [Generation modes](docs/generation_modes.md).
 - 2026/10/06: Kandinsky 6.0 is now available in [Diffusers](https://huggingface.co/docs/diffusers/en/api/pipelines/kandinsky6), [ComfyUI](https://registry.comfy.org/nodes/kandinsky6), [vLLM-omni](https://docs.vllm.ai/projects/vllm-omni/en/latest/api/vllm_omni/diffusion/models/kandinsky6/), [SGLang](https://docs.sglang.io/cookbook/diffusion/Kandinsky/Kandinsky6) and [FastVideo](https://haoailab.com/FastVideo/inference/kandinsky6)
 - 2026/10/06: We added Hugging Face Space for [Kandinsky 6.0 Pro Distill](https://huggingface.co/spaces/kandinskylab/Kandinsky-6.0-Pro-distill-5s)

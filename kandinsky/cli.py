@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -22,14 +23,31 @@ logger = logging.getLogger("kandinsky")
 
 app = cyclopts.App(help="Kandinsky 6 Video inference CLI")
 
-_DEFAULT_CONFIG = str(Path(__file__).resolve().parent / "configs" / "devices" / "h100.yaml")
+_DEFAULT_CONFIGS: tuple[str, ...] = ("h100",)
+
+
+def _resolve_config_spec(config: str | None, configs: list[str] | None) -> str | list[str]:
+    """Return the config spec selected by ``--config`` or ``--configs``.
+
+    ``--config`` is one YAML path (bench, notebooks, resolved configs);
+    ``--configs`` is a sequence of preset tokens. They are mutually exclusive.
+    When both are omitted, the default is :data:`_DEFAULT_CONFIGS`.
+    """
+    if config is not None and configs:
+        raise ValueError("pass either --config <path> or --configs <tokens...>, not both")
+    if config is not None:
+        return config
+    if configs:
+        return list(configs)
+    return list(_DEFAULT_CONFIGS)
 
 
 @app.command
 def generate(  # noqa: PLR0913
     prompt: str,
     *,
-    config: str = _DEFAULT_CONFIG,
+    config: str | None = None,
+    configs: Annotated[list[str] | None, cyclopts.Parameter(consume_multiple=True)] = None,
     out: str | None = None,
     height: int | None = None,
     width: int | None = None,
@@ -58,6 +76,11 @@ def generate(  # noqa: PLR0913
 ):
     """Generate a video from a text prompt.
 
+    ``--configs h100 spd`` composes presets from ``configs/{devices,checkpoints,
+    accelerations}`` left to right (last token wins on conflicts); the default
+    is ``--configs h100``. ``--config <path>`` loads a single YAML (used by
+    bench runs and resolved configs) and is mutually exclusive with
+    ``--configs``.
     With ``sr.enabled: true`` in the config (or ``--sr``) the clip is then
     super-resolved (see ``kandinsky.pipeline.sr``) into ``<out>_sr.<ext>``.
     Geometry / MagCache defaults come from the YAML config unless overridden.
@@ -91,6 +114,8 @@ def generate(  # noqa: PLR0913
     """
     from kandinsky.pipeline.factory import get_pipeline
 
+    spec = _resolve_config_spec(config, configs)
+
     if magcache and navicache:
         raise ValueError("--magcache and --navicache are mutually exclusive")
     conditioning = _conditioning_inputs(
@@ -121,13 +146,13 @@ def generate(  # noqa: PLR0913
         run = open_generate_run()
         _bind_generate_run(run)
         destination = run / "generations" / "output.mp4"
-        _write_launch(run, prompt=prompt, config=config, seed=seed, output="generations/output.mp4")
+        _write_launch(run, prompt=prompt, config=spec, seed=seed, output="generations/output.mp4")
     else:
         destination = Path(out)
         destination.parent.mkdir(parents=True, exist_ok=True)
 
     pipe = get_pipeline(
-        config,
+        spec,
         device=device,
         attention_engine=attention_engine,
         cache_mode=cache_mode,
@@ -173,7 +198,7 @@ def generate(  # noqa: PLR0913
     del pipe  # free the base model before the SR components come in
     gc.collect()
     _super_resolve_if_enabled(
-        config,
+        spec,
         device,
         offload_strategy,
         result,
@@ -259,7 +284,7 @@ def _write_run_prompt(run: Path, video_path: Path, prompts: list[str] | None) ->
 
 @torch.no_grad()
 def _super_resolve_if_enabled(  # noqa: PLR0913
-    config: str,
+    config: str | Sequence[str],
     device: str,
     offload_strategy: OffloadStrategy | None,
     result: Kandinsky6PipelineOutput,
@@ -387,7 +412,8 @@ def download(*names: str, cache_dir: str | None = None) -> None:
 @app.command
 def export(
     *,
-    config: str = _DEFAULT_CONFIG,
+    config: str | None = None,
+    configs: Annotated[list[str] | None, cyclopts.Parameter(consume_multiple=True)] = None,
     out: str | None = None,
     device: str = "cuda:0",
     attention_engine: str | None = None,
@@ -423,7 +449,8 @@ def export(
 
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-    cfg = bind_checkpoint_paths(load_config(config))
+    spec = _resolve_config_spec(config, configs)
+    cfg = bind_checkpoint_paths(load_config(spec))
     aoti = cfg.compile.aoti
     destination = Path(out) if out is not None else export_dir() / "dit_block_aoti.pt2"
     inductor_cache = aoti.cache_dir or str(export_dir() / "inductor")

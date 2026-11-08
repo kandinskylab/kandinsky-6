@@ -41,6 +41,24 @@ class NaviCache:
             }
         )
 
+    def _invalidate_navi_shape_state(self) -> None:
+        """Drop input/output/residual tensors captured at the previous spatial shape.
+
+        Called by SPEED on stage transitions. Keeps the forward counter and the
+        scalar Kalman state (``state_ratio`` / ``uncertainty``) so the skip
+        policy does not restart its warmup.
+        """
+        if self._navi is None:
+            return
+        self._navi["previous_raw_cond_input"] = None
+        self._navi["previous_raw_cond_output"] = None
+        self._navi["previous_raw_uncond_output"] = None
+        self._navi["prior_raw_cond_input"] = None
+        self._navi["cond_residual"] = None
+        self._navi["uncond_residual"] = None
+        self._navi["should_compute_pair"] = True
+        self._navi["accumulated_error"] = 0.0
+
     def _navi_advance(self) -> None:
         st = self._navi
         assert st is not None

@@ -8,6 +8,7 @@ attention, compile, offload, profile, and generation defaults stay on the same o
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 import torch
@@ -32,15 +33,15 @@ logger = logging.getLogger("kandinsky")
 _MODULE_NAMES = ("text_embedder", "dit", "vae", "audio_vae", "vocoder")
 
 
-def _load_bound(path: str | Path) -> PipelineConfig:
+def _load_bound(spec: str | Path | Sequence[str]) -> PipelineConfig:
     from .factory import bind_checkpoint_paths  # noqa: PLC0415  # factory imports this module
 
-    return bind_checkpoint_paths(load_config(path))
+    return bind_checkpoint_paths(load_config(spec))
 
 
 def reconfigure(
     pipe,
-    cfg: PipelineConfig | str | Path,
+    cfg: PipelineConfig | str | Path | Sequence[str],
     *,
     attention_engine: str | None = None,
     cache_mode: str | None = None,
@@ -49,7 +50,7 @@ def reconfigure(
     """Apply ``cfg`` to ``pipe`` and return the same object."""
     config_path = getattr(pipe, "config_path", None)
     if not isinstance(cfg, PipelineConfig):
-        config_path = str(cfg)
+        config_path = cfg if isinstance(cfg, (str, Path)) else tuple(cfg)
         cfg = _load_bound(cfg)
     launch_overrides = diff_launch_overrides(
         cfg,

@@ -70,6 +70,21 @@ class MagCache:
             }
         )
 
+    def _invalidate_mag_shape_state(self) -> None:
+        """Drop residuals captured at the previous spatial shape.
+
+        Called by SPEED on stage transitions: the cached residuals are sized for
+        the previous grid and would corrupt the next ``_project_*`` call. The
+        step counter stays — ``mag_ratios[cnt]`` is still indexed against the
+        global 50-step schedule.
+        """
+        if self._mag is None:
+            return
+        self._mag["residual_cache"] = [None, None]
+        self._mag["accumulated_err"] = [0.0, 0.0]
+        self._mag["accumulated_steps"] = [0, 0]
+        self._mag["accumulated_ratio"] = [1.0, 1.0]
+
     def _mag_should_skip(self) -> tuple[bool, object]:
         st = self._mag
         assert st is not None

@@ -1,0 +1,11 @@
+# SPEED spectral progressive diffusion strategy.
+#
+# Pins the checkpoint to Pro because SPEED is not yet integrated with PiFlow;
+# the Pro checkpoint also brings the 50-step schedule SPEED was tuned on.
+# Override with a later token (for example `lite`) to run SPEED on another
+# non-PiFlow checkpoint.
+
+checkpoint: pro
+
+speed:
+  enabled: true

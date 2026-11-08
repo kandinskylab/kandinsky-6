@@ -9,6 +9,8 @@ setup *ARGS:
     exec "{{justfile_directory()}}/scripts/setup-gpu.sh" --no-dev {{ARGS}}
 
 # Generate a video: just generate 'A cat is lying on a mat, turns toward the camera, opens its mouth and says <S>Hello<E>'
+# Compose presets: just generate 'A cat ...' --configs h100 spd       (device + accelerations/*)
+# Bench or notebook YAMLs: just generate 'A cat ...' --config /path/to/resolved.yaml
 # First and last frame: just generate 'The person walks toward the doorway.' --image first.png --last-image last.png
 # Audio conditions the video: just generate 'A person speaks.' --audio-file speech.wav
 # Video conditions the audio: just generate 'Ocean waves and seabirds.' --video-file silent.mp4

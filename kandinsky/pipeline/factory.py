@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 import torch
@@ -14,6 +15,7 @@ from ..runtime.kernels import bind_attention
 from ..runtime.offload import OffloadHandle, OffloadStrategy, build_offload, reject_release_without_offload
 from ..runtime.profile import attach_profile, diff_launch_overrides
 from ..runtime.sampler import dit_class, reject_incompatible_cache
+from ..runtime.speed import reject_incompatible_speed
 from ..runtime.weights import ensure_checkpoint, load_bf16_checkpoint, materialize_meta_buffers
 from .config import PipelineConfig, load_config
 from .pipeline import Kandinsky6Pipeline
@@ -69,13 +71,19 @@ def bind_checkpoint_paths(cfg: PipelineConfig) -> PipelineConfig:
 
 
 def get_pipeline(
-    conf_path: str,
+    conf_spec: str | Path | Sequence[str],
     device: str | torch.device = "cuda",
     attention_engine: str | None = None,
     cache_mode: str | None = None,
     offload_strategy: OffloadStrategy | None = None,
 ) -> Kandinsky6Pipeline:
-    cfg = load_config(conf_path)
+    """Build a pipeline from a YAML path or a token sequence.
+
+    A ``str``/``Path`` loads one YAML (e.g. a resolved bench config). A sequence
+    of tokens composes ``configs/devices``, ``configs/checkpoints``, and
+    ``configs/accelerations`` left to right — see :func:`load_config`.
+    """
+    cfg = load_config(conf_spec)
     pipe = _build_pipeline(
         cfg,
         device,
@@ -83,7 +91,7 @@ def get_pipeline(
         cache_mode=cache_mode,
         offload_strategy=offload_strategy,
     )
-    pipe.config_path = conf_path
+    pipe.config_path = conf_spec if isinstance(conf_spec, (str, Path)) else tuple(conf_spec)
     pipe.launch_overrides = diff_launch_overrides(
         cfg,
         attention_engine=attention_engine,
@@ -163,6 +171,7 @@ def _build_pipeline(
     gen = cfg.generation
     cache_mode = cache_mode if cache_mode is not None else cfg.cache.mode
     reject_incompatible_cache(cfg, cache_mode)
+    reject_incompatible_speed(cfg, cache_mode)
     off_cfg = cfg.offload
     strategy: OffloadStrategy = offload_strategy if offload_strategy is not None else off_cfg.strategy
     reject_release_without_offload(strategy, cfg.text_embedder.release_after_encode)
@@ -250,6 +259,7 @@ def _build_pipeline(
         max_area=gen.max_area,
         image_divisibility=gen.image_divisibility,
         piflow_conf=cfg.piflow,
+        speed_conf=cfg.speed,
     )
     _apply_cache(pipe, cfg.cache, cache_mode, force=True)
     remember(

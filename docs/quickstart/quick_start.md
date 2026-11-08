@@ -49,8 +49,10 @@ The first run downloads [Kandinsky-6.0-Pro-distill-5s](https://huggingface.co/ka
 Anything after the prompt is a `kandy generate` flag:
 
 ```bash
-just generate 'A cat is lying on a mat, turns toward the camera, opens its mouth and says <S>Hello<E>' --config kandinsky/configs/devices/rtx-5090.yaml --out clip.mp4
+just generate 'A cat is lying on a mat, turns toward the camera, opens its mouth and says <S>Hello<E>' --configs rtx-5090 --out clip.mp4
 ```
+
+Presets compose by name. `--configs h100 spd` deep-merges the device preset with `configs/accelerations/spd.yaml`, switches to the Pro checkpoint, and wraps the base denoising loop with the staged multi-resolution [SPEED](https://arxiv.org/abs/2605.18736) strategy. `--config <path>` loads a single YAML (bench runs, resolved configs) and excludes `--configs`.
 
 Image-to-video-and-audio uses the shipped frame. The other modes are in [generation modes](../generation_modes.md).
 
@@ -60,7 +62,8 @@ just generate 'A cat is lying on a mat, turns toward the camera, opens its mouth
 
 | Flag | Role |
 |---|---|
-| `--config` | YAML preset. The default is `kandinsky/configs/devices/h100.yaml` |
+| `--configs` | Preset tokens resolved across `configs/{devices,checkpoints,accelerations}` and deep-merged left to right. The default is `--configs h100` |
+| `--config` | One YAML path. Excludes `--configs` |
 | `--out` | Output file. Skips the stamped run directory |
 | `--image` | Reference frame for image-to-video-and-audio. The shipped frame is `assets/i2va_input.jpg` |
 | `--last-image` | Last reference of one video. Requires `--image` |
@@ -78,7 +81,7 @@ just generate 'A cat is lying on a mat, turns toward the camera, opens its mouth
 | `--warmup` | One unsaved pass, then the saved run |
 | `--no-progress` | Hide the step bar |
 
-Presets live in `kandinsky/configs/devices/`.
+Presets live in `kandinsky/configs/{devices,checkpoints,accelerations}/`. Device presets pre-validate one GPU, checkpoint tokens override the model, and acceleration tokens flip a coordinated subset of sampler-level settings.
 
 ## Super-resolution
 

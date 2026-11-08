@@ -660,6 +660,22 @@ def _profile_output_dir() -> Path:
     return profile_dir() / "time_mem_module"
 
 
+def _config_identity(spec: Any) -> tuple[str | None, Any, str | None]:
+    """Return ``(name, path_repr, stem)`` for a pipeline config spec.
+
+    A path spec returns the YAML filename, the full path string, and the stem
+    without extension. A token sequence returns ``"+".join(tokens)`` for both
+    name and stem, and the token list itself for ``path_repr`` (JSON-friendly).
+    """
+    if not spec:
+        return None, None, None
+    if isinstance(spec, (str, Path)):
+        path = Path(spec)
+        return path.name, str(spec), path.stem
+    joined = "+".join(spec)
+    return joined, list(spec), joined
+
+
 def _write_time_mem_module(
     pipe: Any,
     report: ProfileReport,
@@ -669,11 +685,12 @@ def _write_time_mem_module(
     config_path = getattr(pipe, "config_path", None)
     overrides = dict(getattr(pipe, "launch_overrides", {}) or {})
     overrides.update(_call_overrides(pipe, raw_call))
+    config_name, config_repr, config_stem = _config_identity(config_path)
     payload = {
         "mode": "time_mem_module",
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "config": None if not config_path else Path(config_path).name,
-        "config_path": None if not config_path else str(config_path),
+        "config": config_name,
+        "config_path": config_repr,
         "overrides": overrides,
         "run": _effective_run(pipe, raw_call, seed),
         "measurements": {
@@ -694,7 +711,7 @@ def _write_time_mem_module(
     directory = _profile_output_dir()
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S-%f")
-    stem = "run" if not config_path else Path(config_path).stem
+    stem = config_stem or "run"
     target = directory / f"{stem}_{stamp}.json"
     temporary = target.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

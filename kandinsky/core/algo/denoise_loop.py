@@ -87,19 +87,23 @@ def denoise_loop(
     recompute_ropes_each_step: bool = False,
     scale_factor: tuple[float, float, float] = (1.0, 1.0, 1.0),
     progress_callback=None,
+    timesteps: Tensor | None = None,
 ) -> LatentBundle:
     """Single-device Euler denoising loop for T2V and T2VA.
 
     RoPE tensors are normally precomputed by the caller (pipeline). Set
     ``recompute_ropes_each_step=True`` to rebuild them every DiT forward (A/B
-    vs pipeline cache; not for production).
+    vs pipeline cache; not for production). When ``timesteps`` is given,
+    ``num_steps`` and ``scheduler_scale`` are ignored and the caller's schedule
+    is used verbatim — this is how SPEED hands a per-stage slice to the loop.
     """
     video = bundle.video  # (sum_T, H, W, C) or (sum_T, H, W, C+extra) for instruct
     audio = bundle.audio  # (sum_A, audio_dim) or None
     is_multimodal = video is not None and audio is not None
 
     device = video.device if video is not None else audio.device
-    timesteps = flow_match_timesteps(num_steps, scheduler_scale, device)
+    if timesteps is None:
+        timesteps = flow_match_timesteps(num_steps, scheduler_scale, device)
 
     video_cu_seqlens = (
         bundle.video_cu_seqlens.to(device=device)

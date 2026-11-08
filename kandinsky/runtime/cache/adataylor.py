@@ -69,6 +69,23 @@ class AdaTaylorCache:
             }
         )
 
+    def _invalidate_ada_shape_state(self) -> None:
+        """Drop input/output/residual tensors captured at the previous spatial shape.
+
+        Called by SPEED on stage transitions: cached residuals and ``last_*`` /
+        ``prev_*`` buffers are sized for the previous grid. ``cnt``, ``k``, and
+        ``full_steps`` are kept so skip accounting stays coherent.
+        """
+        if self._ada is None:
+            return
+        self._ada["prev_in"] = [None, None]
+        self._ada["last_in"] = [None, None]
+        self._ada["last_out"] = [None, None]
+        self._ada["residual"] = [None, None]
+        self._ada["prev_residual"] = [None, None]
+        self._ada["acc"] = [0.0, 0.0]
+        self._ada["hits"] = [0, 0]
+
     # ------------------------------------------------------------------
     # Skip logic
     # ------------------------------------------------------------------

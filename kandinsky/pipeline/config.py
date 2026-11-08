@@ -15,6 +15,7 @@ re-exported here so ``PipelineConfig`` stays the single YAML entry point.
   compile    → runtime.compile / runtime.aoti
   attention  → runtime.kernels
   piflow     → runtime.sampler
+  speed      → runtime.speed (SPEED staged multi-resolution denoising strategy)
   profile    → runtime.profile
 """
 
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -36,6 +38,7 @@ from kandinsky.runtime.kernels import AttentionConfig
 from kandinsky.runtime.offload import OffloadConfig
 from kandinsky.runtime.profile import ProfileConfig, ProfileMode
 from kandinsky.runtime.sampler import PiFlowConfig
+from kandinsky.runtime.speed import SpeedConfig
 
 __all__ = (
     "AdaTaylorConfig",
@@ -56,6 +59,7 @@ __all__ = (
     "ProfileMode",
     "PiFlowConfig",
     "PipelineConfig",
+    "SpeedConfig",
     "TextEmbedderConfig",
     "VocoderConfig",
     "load_config",
@@ -183,6 +187,7 @@ class PipelineConfig(_Cfg):
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
     piflow: PiFlowConfig = Field(default_factory=PiFlowConfig)
+    speed: SpeedConfig = Field(default_factory=SpeedConfig)
     text_embedder: TextEmbedderConfig = Field(default_factory=TextEmbedderConfig)
     beautifier: BeautifierConfig = Field(default_factory=BeautifierConfig)
     audio_vae: AudioVAEConfig | None = None
@@ -201,6 +206,8 @@ class PipelineConfig(_Cfg):
 
 
 _CONFIGS = Path(__file__).resolve().parents[1] / "configs"
+
+_PRESET_DIRS: tuple[str, ...] = ("devices", "checkpoints", "accelerations")
 
 
 def _read_mapping(path: Path) -> dict:
@@ -288,10 +295,60 @@ def _compose(raw: dict) -> dict:
     return _deep_merge(base, raw)
 
 
-def load_config(path: str | Path) -> PipelineConfig:
-    """Load a device preset or a full pipeline YAML.
+def _resolve_token(name: str) -> Path:
+    """Find ``<name>.yaml`` across the preset folders.
 
-    A device preset names ``checkpoint``. When the caller does not pass another
-    checkpoint, that name is the snapshot the factory downloads and runs.
+    A token lives in exactly one of ``configs/devices``, ``configs/checkpoints``,
+    or ``configs/accelerations``. A miss or a collision across folders raises.
     """
-    return PipelineConfig.model_validate(_compose(_read_mapping(Path(path))))
+    matches = [
+        _CONFIGS / folder / f"{name}.yaml"
+        for folder in _PRESET_DIRS
+        if (_CONFIGS / folder / f"{name}.yaml").is_file()
+    ]
+    if not matches:
+        known = {
+            folder: sorted(p.stem for p in (_CONFIGS / folder).glob("*.yaml"))
+            for folder in _PRESET_DIRS
+            if (_CONFIGS / folder).is_dir()
+        }
+        raise ValueError(f"unknown config token {name!r}; known: {known}")
+    if len(matches) > 1:
+        folders = [m.parent.name for m in matches]
+        raise ValueError(f"config token {name!r} is ambiguous across folders: {folders}")
+    return matches[0]
+
+
+def _compose_tokens(tokens: Sequence[str]) -> dict:
+    """Deep-merge preset YAMLs named by tokens, left to right.
+
+    The result is handed to ``_compose`` for checkpoint expansion and DiT module
+    expansion, so a later token may override an earlier ``checkpoint`` name.
+    """
+    if not tokens:
+        raise ValueError("expected at least one config token")
+    seen: set[str] = set()
+    merged: dict = {}
+    for name in tokens:
+        if name in seen:
+            raise ValueError(f"duplicate config token {name!r}")
+        seen.add(name)
+        merged = _deep_merge(merged, _read_mapping(_resolve_token(name)))
+    return merged
+
+
+def load_config(spec: str | Path | Sequence[str]) -> PipelineConfig:
+    """Load a pipeline config by path or by a sequence of name tokens.
+
+    A ``str`` or ``Path`` loads one YAML file (the resolved-config form used by
+    bench runs). A sequence of tokens resolves each name in
+    ``configs/{devices,checkpoints,accelerations}`` and deep-merges them left to
+    right; last token wins on conflicting keys. A device preset names
+    ``checkpoint``; when no later token overrides it, that name is the snapshot
+    the factory downloads and runs.
+    """
+    if isinstance(spec, (str, Path)):
+        raw = _read_mapping(Path(spec))
+    else:
+        raw = _compose_tokens(list(spec))
+    return PipelineConfig.model_validate(_compose(raw))

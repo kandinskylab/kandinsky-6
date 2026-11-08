@@ -189,6 +189,22 @@ class CacheDiT(MagCache, NaviCache, AdaTaylorCache, nn.Module):
         elif self.mode == "adataylor":
             self._reset_ada_state()
 
+    def invalidate_shape_state(self) -> None:
+        """Drop shape-dependent cached tensors on a mid-sampling grid change.
+
+        Used by SPEED between stages: residuals, last-in/out buffers, and any
+        other tensor shaped by the previous grid are reset so the next forward
+        recomputes from scratch at the new spatial size. Step counters and
+        scalar statistics are preserved to keep accounting coherent across
+        stages.
+        """
+        if self.mode == "magcache":
+            self._invalidate_mag_shape_state()
+        elif self.mode == "navicache":
+            self._invalidate_navi_shape_state()
+        elif self.mode == "adataylor":
+            self._invalidate_ada_shape_state()
+
     @property
     def last_generation_stats(self) -> dict | None:
         if self.mode == "magcache" and self._mag is not None:
