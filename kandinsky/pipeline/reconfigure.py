@@ -25,6 +25,7 @@ from kandinsky.runtime.kernels import bind_attention, rebind_attention
 from kandinsky.runtime.offload import OffloadStrategy, _module_to, build_offload, reject_release_without_offload
 from kandinsky.runtime.profile import attach_profile, diff_launch_overrides
 from kandinsky.runtime.sampler import reject_incompatible_cache
+from kandinsky.runtime.temporal import validate_temporal_and_block_cache
 
 from .config import CacheConfig, PipelineConfig, load_config
 
@@ -63,6 +64,7 @@ def reconfigure(
     mode = cache_mode if cache_mode is not None else cfg.cache.mode
     strategy: OffloadStrategy = offload_strategy if offload_strategy is not None else cfg.offload.strategy
     reject_incompatible_cache(cfg, mode)
+    validate_temporal_and_block_cache(cfg, mode, strategy)
     reject_release_without_offload(strategy, cfg.text_embedder.release_after_encode)
 
     prev: PipelineConfig | None = getattr(pipe, "config", None)
@@ -109,6 +111,10 @@ def reconfigure(
         _replace_vocoder(pipe, cfg, load_device)
 
     _apply_generation(pipe, cfg, prev)
+    if pipe.temporal_conf.mode != "off" or mode == "adaptive_block" or (
+        prev is not None and (prev.temporal.mode != "off" or getattr(pipe, "cache_mode", None) == "adaptive_block")
+    ):
+        pipe.speed_conf = cfg.speed
     _apply_cache(pipe, cfg.cache, mode, force=dit_replaced or prev is None)
     _reject_block_export(strategy, cfg)
     # Block offload wraps each block forward. Recompile replaces those wrappers.
@@ -153,6 +159,8 @@ def remember(
 def _same_runtime(pipe, cfg: PipelineConfig, engine: str, mode: str | None, strategy: str) -> bool:
     prev = getattr(pipe, "config", None)
     if prev is None or prev.model_dump() != cfg.model_dump():
+        return False
+    if _adaptive_cache_changed(pipe, mode):
         return False
     return (
         getattr(pipe, "attention_engine", None) == engine
@@ -217,6 +225,7 @@ def _apply_execution(dit, cfg: PipelineConfig, device: torch.device) -> None:
 
 def _apply_generation(pipe, cfg: PipelineConfig, prev: PipelineConfig | None) -> None:
     pipe.piflow_conf = cfg.piflow
+    pipe.temporal_conf = cfg.temporal
     if prev is not None and prev.generation.model_dump() == cfg.generation.model_dump():
         return
     gen = cfg.generation
@@ -235,12 +244,17 @@ def _apply_generation(pipe, cfg: PipelineConfig, prev: PipelineConfig | None) ->
 
 
 def _apply_cache(pipe, cache: CacheConfig, mode: str | None, *, force: bool) -> None:
+    force = force or _adaptive_cache_changed(pipe, mode)
     if not force and pipe.cache_conf.model_dump() == cache.model_dump() and getattr(pipe, "cache_mode", None) == mode:
         return
     pipe.cache_conf = cache
     if mode is None or mode == "none":
         pipe.set_cache(None)
         return
+    if mode == "adaptive_block":
+        pipe.set_cache(mode)
+        return
+
     if mode == "magcache":
         mag = cache.magcache
         if mag is None:
@@ -269,6 +283,11 @@ def _apply_cache(pipe, cache: CacheConfig, mode: str | None, *, force: bool) -> 
         )
         return
     raise ValueError(f"Unknown cache mode: {mode!r}")
+
+
+def _adaptive_cache_changed(pipe, mode: str | None) -> bool:
+    current = pipe.dit.mode if isinstance(pipe.dit, CacheDiT) else "none"
+    return "adaptive_block" in (mode, current) and current != mode
 
 
 def _restore_when_offload_ends(pipe, strategy: OffloadStrategy) -> None:

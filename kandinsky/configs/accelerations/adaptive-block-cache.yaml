@@ -1,0 +1,6 @@
+# Enable adaptive block caching on the full temporal grid.
+cache:
+  mode: adaptive_block
+  adaptive_block:
+    input_threshold: 0.75
+    residual_threshold: 0.75

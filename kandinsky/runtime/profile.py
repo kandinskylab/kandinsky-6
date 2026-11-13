@@ -708,6 +708,9 @@ def _write_time_mem_module(
         },
         "environment": _environment(torch.device(getattr(pipe, "device", "cpu"))),
     }
+    acceleration = getattr(pipe, "last_acceleration_stats", None)
+    if acceleration is not None:
+        payload["acceleration"] = acceleration
     directory = _profile_output_dir()
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S-%f")

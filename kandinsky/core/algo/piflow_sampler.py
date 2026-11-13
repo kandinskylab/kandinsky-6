@@ -7,6 +7,7 @@ import torch
 from ..types import LatentBundle, TextEmbeds
 from .generation import ImageCondition
 from .piflow_math import MultimodalDXPolicy, policy_rollout_fm, shift_timesteps
+from .temporal.trajectory import TemporalTrajectory
 
 
 def _normalize_grid_prediction(prediction: torch.Tensor, state: torch.Tensor, name: str) -> torch.Tensor:
@@ -60,6 +61,8 @@ def piflow_denoise_loop(  # noqa: PLR0913, PLR0915
     shift: float | None = None,
     num_policy_substeps: int = 128,
     progress_callback=None,
+    temporal: TemporalTrajectory | None = None,
+    dit_kwargs: dict[str, object] | None = None,
 ) -> LatentBundle:
     """Run the reference multimodal DX/π-Flow schedule without CFG."""
     del scale_factor
@@ -90,12 +93,27 @@ def piflow_denoise_loop(  # noqa: PLR0913, PLR0915
     video_time_scale = 1000.0 if sample_video else 0.0
     audio_time_scale = 1000.0 if sample_audio else 0.0
 
+    full_video_offsets = video_cu_seqlens
+    full_visual_rope = visual_rope
+    dit_kwargs = dit_kwargs or {}
     for step_id in range(num_steps):
         is_final_step = step_id == num_steps - 1
         segment_size = base_segment_size * (final_step_size_scale if is_final_step else 1.0)
         tau_src = raw_t_src
         tau_dst = (tau_src - segment_size).clamp(min=eps)
         sigma_t_src = shift_timesteps(tau_src, shift)
+        extra_dit_args = dit_kwargs
+        video_step = None
+        if temporal is not None:
+            q_dst = shift_timesteps(tau_dst, shift)
+            video_step = temporal.before_step(
+                step_id, video, full_video_offsets, full_visual_rope, sigma_t_src, q_dst,
+                tau_src, tau_dst, shift,
+            )
+            video, video_cu_seqlens = video_step.video, video_step.offsets
+            visual_rope = video_step.rope
+            if video_step.cross_rope is not None:
+                extra_dit_args = {**dit_kwargs, "av_cross_rope": video_step.cross_rope}
         model_input_v = image.apply(
             video,
             has_visual_cond=bool(dit.visual_cond),
@@ -106,12 +124,16 @@ def piflow_denoise_loop(  # noqa: PLR0913, PLR0915
             x_audio=audio,
             text_embed=text_embeds["text_embeds"],
             pooled_text_embed=text_embeds["pooled_embed"],
-            time=[sigma_t_src * video_time_scale, sigma_t_src * audio_time_scale],
+            time=[
+                (sigma_t_src if video_step is None else video_step.sigma) * video_time_scale,
+                sigma_t_src * audio_time_scale,
+            ],
             visual_rope=visual_rope,
             audio_rope=audio_rope,
             text_rope=text_rope,
             attention_mask=attention_mask,
             visual_token_type_ids=visual_token_type_ids,
+            **extra_dit_args,
         )
         pred_video = _normalize_grid_prediction(pred_video, video, "video")
         pred_audio = _normalize_grid_prediction(pred_audio, audio, "audio")
@@ -141,6 +163,11 @@ def piflow_denoise_loop(  # noqa: PLR0913, PLR0915
             float(segment_size), device=device, dtype=sigma_t_src.dtype
         ).reshape(audio.shape[0] if audio.ndim == 2 else batch_size, *((audio.dim() - 1) * [1]))
 
+        if video_step is not None and video_step.segment is not None:
+            video_sigma = video_step.sigma.reshape_as(video_sigma)
+            video_tau_src, video_tau_dst = video_step.tau_src, video_step.tau_dst
+            video_segment = video_step.segment.reshape_as(video_segment)
+
         policy = MultimodalDXPolicy(
             denoising_output_v=pred_video,
             x_t_src_v=video[..., :video_dim],
@@ -154,6 +181,10 @@ def piflow_denoise_loop(  # noqa: PLR0913, PLR0915
             mode="grid",
             eps=eps,
         ).detach()
+        if temporal is not None and temporal.chosen is None:
+            video_state = video[..., :video_dim]
+            velocity = policy.policy_V.pi(video_state, video_sigma)
+            temporal.observe(step_id, video_state, velocity, video_sigma, sigma_t_src - q_dst)
         if sample_video:
             video, _, _ = policy_rollout_fm(
                 video[..., :video_dim],

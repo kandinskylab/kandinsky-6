@@ -38,5 +38,5 @@ def reject_incompatible_cache(cfg: Any, cache_mode: str | None) -> None:
         raise ValueError("piflow.enabled requires dit.is_multimodal=true")
     if cfg.generation.guidance_weight != 1.0:
         raise ValueError("piflow.enabled requires generation.guidance_weight=1.0")
-    if cache_mode not in (None, "none"):
+    if cache_mode not in (None, "none", "adaptive_block"):
         raise ValueError("piflow.enabled is incompatible with MagCache/NaviCache")
