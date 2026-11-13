@@ -24,6 +24,7 @@ from ..core.algo.prepare_latents import (
     prepare_video_latents,
 )
 from ..core.algo.prepare_ropes import VisualRopeCache, compute_rope1d, on_device
+from ..core.algo.temporal.trajectory import FULL_FRAMES, TemporalTrajectory
 from ..core.components.beautifier import NullBeautifier
 from ..core.ports import (
     append_reference_rope,
@@ -36,6 +37,7 @@ from ..runtime.cache import CacheDiT, CacheMode
 from ..runtime.offload import NoOpOffload, OffloadHandle, OffloadStrategy
 from ..runtime.profile import NoOpProfile
 from ..runtime.speed import SpeedConfig
+from ..runtime.temporal import TemporalConfig
 from .config import CacheConfig, MagCacheConfig, NaviCacheConfig, PipelineConfig
 from .media import load_audio_condition, load_video_condition
 from .progress import denoising_progress
@@ -163,6 +165,7 @@ class Kandinsky6Pipeline:
         image_divisibility: int = 16,
         piflow_conf=None,
         speed_conf: SpeedConfig | dict | None = None,
+        temporal_conf: TemporalConfig | None = None,
     ):
         self.dit = dit
         self.text_embedder = text_embedder
@@ -200,6 +203,8 @@ class Kandinsky6Pipeline:
             self.cache_conf = CacheConfig.model_validate(cache_conf)
         self.beautifier = NullBeautifier()
         self._visual_rope_cache = VisualRopeCache()
+        self.temporal_conf = temporal_conf if temporal_conf is not None else TemporalConfig()
+        self.last_acceleration_stats = None
 
     @property
     def raw_dit(self):
@@ -261,6 +266,12 @@ class Kandinsky6Pipeline:
 
         if mode is None or mode.lower() == "none":
             self.dit.set_cache("none")
+            return
+
+        if mode == "adaptive_block":
+            if mode_name is not None or params:
+                raise TypeError("Adaptive Block Cache settings come from cache.adaptive_block")
+            self.dit.set_cache(mode, adaptive_block=self.cache_conf.adaptive_block)
             return
 
         num_steps = params.pop("num_steps", self.num_steps)
@@ -377,6 +388,7 @@ class Kandinsky6Pipeline:
         audio: str | Path | None = None,
         video: str | Path | None = None,
     ) -> Kandinsky6PipelineOutput:
+        self.last_acceleration_stats = None
         batch_size = _batch_size(text, negative_text, image, save_path)
         conditioned = audio is not None or video is not None
         if audio is not None and video is not None:
@@ -449,10 +461,32 @@ class Kandinsky6Pipeline:
             video_path=video,
             show_progress=show_progress,
         )
+        cache_mode = self.dit.mode if isinstance(self.dit, CacheDiT) else "none"
+        if self.temporal_conf.mode != "off" or cache_mode == "adaptive_block":
+            if cache_mode not in ("none", "adaptive_block"):
+                raise ValueError("Temporal supports cache.mode=none or adaptive_block")
+            self._validate_acceleration_request(request)
         self._align_cache(request)
         prepared = self._prepare(request)
         bundle = self._denoise(prepared)
         return self._decode(prepared, bundle)
+
+    def _validate_acceleration_request(self, request: Generation) -> None:
+        if (not request.piflow or request.generation_mode != "t2va" or request.batch_size != 1
+                or request.held.active or request.num_steps != 10):
+            raise ValueError("Temporal and Adaptive Block Cache require single-clip 10-step PiFlow T2VA")
+        if (request.height, request.width) != (480, 864):
+            raise ValueError("Temporal and Adaptive Block Cache require 864x480")
+        frames = request.latent_frames
+        if frames is None and request.time_length is None:
+            frames = self.latent_frames
+        if frames not in (None, FULL_FRAMES) or request.time_length not in (None, 5):
+            raise ValueError("Temporal and Adaptive Block Cache require a five-second clip")
+        if self.speed_conf.enabled:
+            raise ValueError("Temporal and Adaptive Block Cache cannot be combined with SPEED")
+        execution = getattr(self, "_execution_key", None)
+        if self.offload.strategy == "block" or (execution is not None and execution[0] == "aoti"):
+            raise ValueError("Temporal and Adaptive Block Cache support eager or regional torch.compile with none/module offload")
 
     def _align_cache(self, request: Generation) -> None:
         if isinstance(self.dit, CacheDiT) and self.dit.mode != "none":
@@ -771,7 +805,19 @@ class Kandinsky6Pipeline:
                 if self.speed_conf.enabled:
                     return self._denoise_speed(prepared, callback)
                 if request.piflow:
-                    return piflow_denoise_loop(
+                    temporal = None
+                    if self.temporal_conf.mode != "off":
+                        fixed = self.temporal_conf.mode == "fixed"
+                        temporal = TemporalTrajectory(
+                            prepared.bundle.video, prepared.bundle.audio, self.raw_dit, self.scale_factor,
+                            switch_after_calls=self.temporal_conf.switch_after_calls if fixed else None,
+                            threshold=self.temporal_conf.threshold,
+                        )
+                    block_state = (
+                        self.dit.new_adaptive_block_state(request.num_steps)
+                        if isinstance(self.dit, CacheDiT) else None
+                    )
+                    result = piflow_denoise_loop(
                         bundle=prepared.bundle,
                         dit=self.dit,
                         text_embeds=prepared.text_embeds,
@@ -791,7 +837,15 @@ class Kandinsky6Pipeline:
                         shift=self.piflow_conf.shift,
                         num_policy_substeps=self.piflow_conf.num_policy_substeps,
                         progress_callback=callback,
+                        temporal=temporal,
+                        dit_kwargs={"adaptive_block_state": block_state} if block_state is not None else None,
                     )
+                    if temporal is not None or block_state is not None:
+                        self.last_acceleration_stats = {
+                            "temporal": None if temporal is None else temporal.summary(),
+                            "adaptive_block": None if block_state is None else block_state.summary(),
+                        }
+                    return result
                 return denoise_loop(
                     bundle=prepared.bundle,
                     dit=self.dit,

@@ -13,13 +13,14 @@ from typing import Literal
 from torch import nn
 
 from ..base import ConfigModel
+from .adaptive_block import AdaptiveBlockConfig, AdaptiveBlockState
 from .adataylor import AdaTaylorCache, AdaTaylorConfig
 from .magcache import MagCache, MagCacheConfig, prepare_mag_ratios, select_mag_ratios
 from .navicache import NaviCache, NaviCacheConfig
 
 logger = logging.getLogger(__name__)
 
-CacheMode = Literal["none", "magcache", "navicache", "adataylor"]
+CacheMode = Literal["none", "magcache", "navicache", "adataylor", "adaptive_block"]
 CacheModeName = CacheMode
 
 
@@ -28,6 +29,7 @@ class CacheConfig(ConfigModel):
     magcache: MagCacheConfig | None = None
     navicache: NaviCacheConfig | None = None
     adataylor: AdaTaylorConfig | None = None
+    adaptive_block: AdaptiveBlockConfig | None = None
 
 
 class CacheDiT(MagCache, NaviCache, AdaTaylorCache, nn.Module):
@@ -40,6 +42,7 @@ class CacheDiT(MagCache, NaviCache, AdaTaylorCache, nn.Module):
         self._mag: dict | None = None
         self._navi: dict | None = None
         self._ada: dict | None = None
+        self._adaptive_block: AdaptiveBlockConfig | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -66,13 +69,23 @@ class CacheDiT(MagCache, NaviCache, AdaTaylorCache, nn.Module):
         cooldown: int | None = None,
         max_hits: int | None = None,
         extrap: bool | None = None,
+        adaptive_block: AdaptiveBlockConfig | None = None,
     ) -> None:
         if mode is None:
             mode = "none"
-        if mode not in ("none", "magcache", "navicache", "adataylor"):
+        if mode not in ("none", "magcache", "navicache", "adataylor", "adaptive_block"):
             raise ValueError(f"Unknown cache mode: {mode!r}")
 
+        if mode == "adaptive_block":
+            if not getattr(self.module, "is_multimodal", False) or len(self.module.visual_transformer_blocks) != 60:
+                raise ValueError("Adaptive Block Cache requires 60 fused video/audio blocks")
+            self.mode = mode
+            self._mag = self._navi = self._ada = None
+            self._adaptive_block = adaptive_block if adaptive_block is not None else AdaptiveBlockConfig()
+            return
+
         if mode == "none":
+            self._adaptive_block = None
             self.mode = "none"
             self._mag = None
             self._navi = None
@@ -219,7 +232,19 @@ class CacheDiT(MagCache, NaviCache, AdaTaylorCache, nn.Module):
     # Forward dispatch
     # ------------------------------------------------------------------
 
+    def new_adaptive_block_state(self, num_steps: int) -> AdaptiveBlockState | None:
+        if self.mode == "adaptive_block" and self._adaptive_block is not None:
+            return AdaptiveBlockState(self._adaptive_block, num_steps)
+        return None
+
     def forward(self, *args, **kwargs):
+        if self.mode == "adaptive_block":
+            adaptive_block_state = kwargs.pop("adaptive_block_state", None)
+            if adaptive_block_state is None:
+                raise ValueError("Adaptive Block Cache requires a per-generation PiFlow state")
+            if adaptive_block_state.next_step(kwargs["x_video"]):
+                kwargs["adaptive_block_tail"] = adaptive_block_state.apply
+            return self.module(*args, **kwargs)
         if self.mode == "none":
             return self.module(*args, **kwargs)
         if self.mode == "magcache":
@@ -240,6 +265,7 @@ class CacheDiT(MagCache, NaviCache, AdaTaylorCache, nn.Module):
             return getattr(module, name)
 
 __all__ = (
+    "AdaptiveBlockConfig",
     "AdaTaylorConfig",
     "CacheConfig",
     "CacheDiT",

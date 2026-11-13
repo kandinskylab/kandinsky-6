@@ -90,3 +90,33 @@ just generate-sr from-video --input clip.mp4 --output-dir outputs
 ```
 
 Runs `kandy-sr` in `.venv` on an existing clip. Arguments are the super-resolution CLI: the subcommand, the input clip, and the output directory. Paths and scale also come from the SR config.
+
+
+## Temporal and Adaptive Block Cache
+
+Use these presets with Pro Distill PiFlow for one 864×480 text-to-video clip
+with audio, 31 full-grid video latents, and ten DiT calls. They support eager
+execution and regional torch.compile with no offload or module offload.
+
+```bash
+just generate 'A person speaks.' --configs h100 pro-distill temporal-fixed
+just generate 'A person speaks.' --configs h100 pro-distill temporal-a2
+just generate 'A person speaks.' --configs h100 pro-distill adaptive-block-cache
+just generate 'A person speaks.' --configs h100 pro-distill temporal-a2 adaptive-block-cache
+
+just generate 'A person speaks.' --configs h100 pro-distill temporal-fixed adaptive-block-cache
+```
+
+Fixed Temporal switches to 31 video latents after two calls on 16 latents.
+Adaptive Temporal integrates the predicted clean video's high-frequency energy
+fraction over the full-grid noise schedule and switches after at most eight
+reduced-grid calls. Audio follows the base PiFlow schedule in both modes.
+
+Adaptive Block Cache can run on its own or with either Temporal preset. It
+computes the first fused block on every call and reuses the remaining blocks'
+paired video and audio residuals when the drift estimates are within their
+thresholds. It needs two full calls on the 31-frame grid before it can hit and
+always computes the final call in full.
+
+With `profile.mode: time_mem_module`, the profile JSON includes the number of
+reduced-grid calls before the transition and the zero-based cache hit indices.

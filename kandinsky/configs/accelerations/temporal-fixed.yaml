@@ -1,0 +1,4 @@
+# Fixed T16 -> T31 after two DiT calls (T2).
+temporal:
+  mode: fixed
+  switch_after_calls: 2

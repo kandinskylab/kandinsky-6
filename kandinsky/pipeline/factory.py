@@ -16,6 +16,7 @@ from ..runtime.offload import OffloadHandle, OffloadStrategy, build_offload, rej
 from ..runtime.profile import attach_profile, diff_launch_overrides
 from ..runtime.sampler import dit_class, reject_incompatible_cache
 from ..runtime.speed import reject_incompatible_speed
+from ..runtime.temporal import validate_temporal_and_block_cache
 from ..runtime.weights import ensure_checkpoint, load_bf16_checkpoint, materialize_meta_buffers
 from .config import PipelineConfig, load_config
 from .pipeline import Kandinsky6Pipeline
@@ -174,6 +175,7 @@ def _build_pipeline(
     reject_incompatible_speed(cfg, cache_mode)
     off_cfg = cfg.offload
     strategy: OffloadStrategy = offload_strategy if offload_strategy is not None else off_cfg.strategy
+    validate_temporal_and_block_cache(cfg, cache_mode, strategy)
     reject_release_without_offload(strategy, cfg.text_embedder.release_after_encode)
     if strategy == "block" and cfg.paths.dit_export is not None:
         raise ValueError("Block offload supports eager and regional torch.compile, not paths.dit_export")
@@ -260,6 +262,7 @@ def _build_pipeline(
         image_divisibility=gen.image_divisibility,
         piflow_conf=cfg.piflow,
         speed_conf=cfg.speed,
+        temporal_conf=cfg.temporal,
     )
     _apply_cache(pipe, cfg.cache, cache_mode, force=True)
     remember(

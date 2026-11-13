@@ -9,6 +9,8 @@ Architecture decisions:
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Iterable
+from itertools import islice
 
 import torch
 import torch.nn.functional as F
@@ -446,6 +448,8 @@ class FusedTransformerDecoderBlock(nn.Module):
         modality_mask=None,
         av_gate_scale: float = 1.0,
         va_gate_scale: float = 1.0,
+        *,
+        av_cross_rope: tuple[Tensor, Tensor] | None = None,
     ):
         fake_audio = modality_mask[0] if modality_mask is not None else 0
         fake_video = modality_mask[1] if modality_mask is not None else 0
@@ -495,6 +499,8 @@ class FusedTransformerDecoderBlock(nn.Module):
                 # V→A and A→V attention
                 rq_v = vis_rope if self.ca_rope else None
                 rk_a = aud_rope if self.ca_rope else None
+                if av_cross_rope is not None:
+                    rq_v, rk_a = av_cross_rope
                 vis_from_aud = self.va_cross_attention(vis_for_va, aud_pre_ca, rope_q=rq_v, rope_kv=rk_a) * (1 - fake_audio) * (1 - fake_video)
                 aud_from_vis = self.av_cross_attention(aud_for_av, vis_pre_ca, rope_q=rk_a, rope_kv=rq_v) * (1 - fake_audio) * (1 - fake_video)
 
@@ -828,6 +834,39 @@ class DiffusionTransformer3D(nn.Module):
             )
         return vis_embed, aud_embed
 
+    def _run_accelerated_fused_blocks(
+        self,
+        vis_embed: Tensor,
+        aud_embed: Tensor,
+        video_te: Tensor,
+        audio_te: Tensor,
+        video_tm: Tensor,
+        audio_tm: Tensor,
+        vis_rope: Tensor,
+        aud_rope: Tensor,
+        attn_mask: Tensor | None,
+        av_cross_rope: tuple[Tensor, Tensor] | None,
+        adaptive_block_tail: Callable[..., tuple[Tensor, Tensor]] | None,
+    ) -> tuple[Tensor, Tensor]:
+        rope_kwargs = {} if av_cross_rope is None else {"av_cross_rope": av_cross_rope}
+
+        def run_blocks(blocks: Iterable[nn.Module], video: Tensor, audio: Tensor) -> tuple[Tensor, Tensor]:
+            for block in blocks:
+                video, audio = block(
+                    video, audio, video_te, audio_te, (video_tm, audio_tm),
+                    vis_rope, aud_rope, attn_mask, **rope_kwargs,
+                )
+            return video, audio
+
+        if adaptive_block_tail is None:
+            return run_blocks(self.visual_transformer_blocks, vis_embed, aud_embed)
+        video, audio = run_blocks((self.visual_transformer_blocks[0],), vis_embed, aud_embed)
+
+        def run_tail(video: Tensor, audio: Tensor) -> tuple[Tensor, Tensor]:
+            return run_blocks(islice(self.visual_transformer_blocks, 1, None), video, audio)
+
+        return adaptive_block_tail(video, audio, run_tail)
+
     def _project_video(self, vis_embed: Tensor, vis_shape: tuple, tm: Tensor) -> Tensor:
         vis_embed = vis_embed.reshape(-1, *vis_shape, vis_embed.shape[-1])
         return self.out_layer(vis_embed, tm)
@@ -864,6 +903,9 @@ class DiffusionTransformer3D(nn.Module):
         text_rope: Tensor | list[Tensor],
         attention_mask: Tensor | None = None,
         visual_token_type_ids: Tensor | None = None,
+        *,
+        av_cross_rope: tuple[Tensor, Tensor] | None = None,
+        adaptive_block_tail: Callable[..., tuple[Tensor, Tensor]] | None = None,
     ) -> Tensor | tuple[Tensor, Tensor]:
         """RoPE tensors are precomputed outside (pipeline / export); not from positions."""
         both = x_video is not None and x_audio is not None and self.is_multimodal
@@ -925,11 +967,18 @@ class DiffusionTransformer3D(nn.Module):
         )
         aud_embed, aud_rope = self._embed_audio(x_audio, audio_rope)
 
-        vis_embed, aud_embed = self._run_visual_blocks_fused(
-            vis_embed, aud_embed,
-            video_te, audio_te, video_tm, audio_tm,
-            vis_rope, aud_rope, attn_mask,
-        )
+        if av_cross_rope is not None or adaptive_block_tail is not None:
+            vis_embed, aud_embed = self._run_accelerated_fused_blocks(
+                vis_embed, aud_embed,
+                video_te, audio_te, video_tm, audio_tm,
+                vis_rope, aud_rope, attn_mask, av_cross_rope, adaptive_block_tail,
+            )
+        else:
+            vis_embed, aud_embed = self._run_visual_blocks_fused(
+                vis_embed, aud_embed,
+                video_te, audio_te, video_tm, audio_tm,
+                vis_rope, aud_rope, attn_mask,
+            )
         return self._project_fused(
             vis_embed, aud_embed, vis_shape, video_tm, audio_tm,
         )

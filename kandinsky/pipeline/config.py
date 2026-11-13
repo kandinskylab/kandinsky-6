@@ -39,6 +39,7 @@ from kandinsky.runtime.offload import OffloadConfig
 from kandinsky.runtime.profile import ProfileConfig, ProfileMode
 from kandinsky.runtime.sampler import PiFlowConfig
 from kandinsky.runtime.speed import SpeedConfig
+from kandinsky.runtime.temporal import TemporalConfig
 
 __all__ = (
     "AdaTaylorConfig",
@@ -188,6 +189,7 @@ class PipelineConfig(_Cfg):
     cache: CacheConfig = Field(default_factory=CacheConfig)
     piflow: PiFlowConfig = Field(default_factory=PiFlowConfig)
     speed: SpeedConfig = Field(default_factory=SpeedConfig)
+    temporal: TemporalConfig = Field(default_factory=TemporalConfig)
     text_embedder: TextEmbedderConfig = Field(default_factory=TextEmbedderConfig)
     beautifier: BeautifierConfig = Field(default_factory=BeautifierConfig)
     audio_vae: AudioVAEConfig | None = None
